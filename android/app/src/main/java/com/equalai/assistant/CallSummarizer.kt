@@ -17,8 +17,9 @@ object CallSummarizer {
     private val running: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private const val NO_AUDIO =
-        "The call was answered, but no sound could be captured. This phone probably blocks the " +
-            "microphone for apps during calls."
+        "The call was answered, but the caller's voice could not be captured: this phone blocks the " +
+            "microphone for apps during calls. The recording contains the assistant's voice only. Make sure the " +
+            "Equal AI accessibility service is turned on in Setup (it helps on some phones), then try again."
 
     suspend fun process(ctx: Context, input: CallRecord, announce: Boolean = true): CallRecord {
         if (!running.add(input.id)) return input
