@@ -62,7 +62,8 @@ class EqualNotificationService : NotificationListenerService() {
             sender = title.ifBlank { appName },
             message = text,
             timestamp = time,
-            replyAction = replyAction
+            replyAction = replyAction,
+            contentIntent = notif.contentIntent
         )
 
         AssistantBridge.onMain {
@@ -85,6 +86,15 @@ class EqualNotificationService : NotificationListenerService() {
         try { cancelNotification(target.key) } catch (e: Exception) { }
         AssistantBridge.onMain { AssistantBridge.notifications.remove(target) }
         AssistantBridge.log("Dismissed notification from ${target.sender}")
+    }
+
+    /** Removes one item from Equal's list and from the phone's notification tray. */
+    fun dismissItem(item: AppNotificationItem) {
+        try { cancelNotification(item.key) } catch (e: Exception) { }
+        AssistantBridge.onMain {
+            AssistantBridge.notifications.remove(item)
+            if (AssistantBridge.latestNotification === item) AssistantBridge.latestNotification = null
+        }
     }
 
     fun replyToLatest(replyText: String): Boolean {
