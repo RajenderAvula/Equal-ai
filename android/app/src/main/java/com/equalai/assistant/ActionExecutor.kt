@@ -9,7 +9,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Bundle
 import android.provider.ContactsContract
+import android.telecom.TelecomManager
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -128,6 +130,18 @@ object ActionExecutor {
     fun makePhoneCall(context: Context, target: String) {
         val number = resolveContactNumber(context, target)
         val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        if (hasPerm) {
+            // placeCall needs no screen and no tap, so it works from a background alarm
+            try {
+                (context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager)
+                    .placeCall(Uri.fromParts("tel", number, null), Bundle())
+                return
+            } catch (e: Exception) {
+                AssistantBridge.log("Direct call failed (${e.localizedMessage}), trying the dialer")
+            }
+        } else {
+            AssistantBridge.log("Phone permission missing: the dialer will open. Allow Phone in app settings.")
+        }
         val action = if (hasPerm) Intent.ACTION_CALL else Intent.ACTION_DIAL
         launch(context, Intent(action, Uri.parse("tel:" + Uri.encode(number))))
     }
@@ -183,17 +197,10 @@ object ActionExecutor {
         }
     }
 
-    /** Fallback when the cloud backend is unavailable: dial, switch to speaker, speak via TTS. */
-    @Suppress("DEPRECATION")
+    /** Scheduled call: place it, then speak the custom text as soon as the other person answers. */
     private fun callAndSpeakOnDevice(context: Context, task: ScheduledActionItem) {
+        OutgoingCall.arm(task.message)
         makePhoneCall(context, task.target)
-        Handler(Looper.getMainLooper()).postDelayed({
-            try {
-                val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.isSpeakerphoneOn = true
-            } catch (e: Exception) { }
-            AssistantBridge.foregroundService?.speakBackground(task.message)
-        }, 9_000L)
     }
 
     suspend fun executeTask(ctx: Context, t: ScheduledActionItem) {
