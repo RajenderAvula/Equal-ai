@@ -24,6 +24,7 @@ object CallStore {
         .put("recordingFile", c.recordingFile ?: JSONObject.NULL)
         .put("state", c.state)
         .put("audioOk", c.audioOk)
+        .put("diag", c.diag)
 
     private fun fromJson(o: JSONObject) = CallRecord(
         id = o.getString("id"),
@@ -36,7 +37,8 @@ object CallStore {
         durationSec = o.optInt("durationSec"),
         recordingFile = if (o.isNull("recordingFile")) null else o.optString("recordingFile"),
         state = o.optString("state", "DONE"),
-        audioOk = o.optBoolean("audioOk", true)
+        audioOk = o.optBoolean("audioOk", true),
+        diag = o.optString("diag", "")
     )
 
     @Synchronized
