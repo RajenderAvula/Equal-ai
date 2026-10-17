@@ -56,13 +56,14 @@ object CommandRouter {
         }
 
         // ---- 2. Notification follow-ups ---------------------------------------------------
-        if (clean in setOf("open the app", "open it", "open app")) {
-            val n = AssistantBridge.latestNotification
+        if (clean in setOf("open", "open it", "open this", "open that", "open the app", "open app",
+                "open notification", "open the notification", "open message", "open the message")) {
+            val n = AssistantBridge.latestNotification ?: AssistantBridge.notifications.firstOrNull()
             if (n != null) {
                 say("Opening ${n.appName}")
-                ActionExecutor.openAppByPackageName(app, n.packageName)
+                ActionExecutor.openNotification(app, n)
             } else {
-                say("There is no recent notification app to open.")
+                say("There is no recent notification to open.")
             }
             return
         }
