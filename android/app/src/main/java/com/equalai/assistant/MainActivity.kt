@@ -18,7 +18,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,12 +36,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -222,10 +226,8 @@ fun EqualAssistantMainScreen() {
                     AssistantBridge.wakeWordRequired = it
                     AppSettings.wakeWordRequired = it
                 }
-                TextButton(onClick = { scope.launch { CommandRouter.summarizeAll(context) } }) {
-                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Summarize", fontSize = 12.sp)
+                IconButton(onClick = { scope.launch { CommandRouter.summarizeAll(context) } }) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = "Summarize everything", tint = Green)
                 }
             }
 
@@ -310,6 +312,16 @@ fun SchedulerTab(context: Context) {
     var actionType by remember { mutableStateOf("WHATSAPP") }
     var triggerAt by remember { mutableStateOf(System.currentTimeMillis() + 10 * 60_000L) }
     var attachmentUriString by remember { mutableStateOf<String?>(null) }
+    var appLabel by remember { mutableStateOf("") }
+    var showAppPicker by remember { mutableStateOf(false) }
+
+    if (showAppPicker) {
+        AppPickerDialog(
+            context = context,
+            onPick = { pkg, label -> target = pkg; appLabel = label; showAppPicker = false },
+            onDismiss = { showAppPicker = false }
+        )
+    }
 
     val contactPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickContact()) { uri ->
         uri?.let {
@@ -369,30 +381,60 @@ fun SchedulerTab(context: Context) {
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("WHATSAPP" to "WhatsApp", "CALL_SPEAK" to "Call & speak", "SMS" to "SMS").forEach { (k, v) ->
-                FilterChip(selected = actionType == k, onClick = { actionType = k }, label = { Text(v) })
+            listOf("WHATSAPP" to "WhatsApp", "CALL_SPEAK" to "Call", "SMS" to "SMS", "OPEN_APP" to "App").forEach { (k, v) ->
+                FilterChip(
+                    selected = actionType == k,
+                    onClick = {
+                        if (actionType != k) { target = ""; appLabel = "" }
+                        actionType = k
+                    },
+                    label = { Text(v) }
+                )
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = target,
-                onValueChange = { target = it },
-                label = { Text("Contact number or name") },
-                modifier = Modifier.weight(1f),
-                singleLine = true
+        if (actionType == "OPEN_APP") {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = appLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("App to open") },
+                    placeholder = { Text("Tap the apps button to browse") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                IconButton(onClick = { showAppPicker = true }) {
+                    Icon(Icons.Default.Apps, contentDescription = "Browse apps", tint = Green)
+                }
+            }
+            Text(
+                "Equal opens this app at the chosen time. Turn on the Equal AI accessibility service in Setup " +
+                    "so Android allows opening apps from the background.",
+                fontSize = 12.sp, color = Color.Gray
             )
-            IconButton(onClick = { contactPicker.launch(null) }) {
-                Icon(Icons.Default.Contacts, contentDescription = "Pick contact", tint = Green)
+        } else {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = target,
+                    onValueChange = { target = it },
+                    label = { Text("Contact number or name") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                IconButton(onClick = { contactPicker.launch(null) }) {
+                    Icon(Icons.Default.Contacts, contentDescription = "Pick contact", tint = Green)
+                }
             }
+    
+            OutlinedTextField(
+                value = message,
+                onValueChange = { message = it },
+                label = { Text(if (actionType == "CALL_SPEAK") "Text to speak on the call" else "Message text") },
+                modifier = Modifier.fillMaxWidth()
+            )
+    
         }
-
-        OutlinedTextField(
-            value = message,
-            onValueChange = { message = it },
-            label = { Text(if (actionType == "CALL_SPEAK") "Text to speak on the call" else "Message text") },
-            modifier = Modifier.fillMaxWidth()
-        )
 
         if (actionType == "WHATSAPP") {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -463,8 +505,9 @@ fun SchedulerTab(context: Context) {
         Button(
             onClick = {
                 when {
-                    target.isBlank() -> Toast.makeText(context, "Enter a contact", Toast.LENGTH_SHORT).show()
-                    message.isBlank() && attachmentUriString == null ->
+                    target.isBlank() ->
+                        Toast.makeText(context, if (actionType == "OPEN_APP") "Choose an app" else "Enter a contact", Toast.LENGTH_SHORT).show()
+                    actionType != "OPEN_APP" && message.isBlank() && attachmentUriString == null ->
                         Toast.makeText(context, "Enter a message", Toast.LENGTH_SHORT).show()
                     triggerAt <= System.currentTimeMillis() + 5_000L ->
                         Toast.makeText(context, "Pick a time in the future", Toast.LENGTH_SHORT).show()
@@ -472,11 +515,12 @@ fun SchedulerTab(context: Context) {
                         Scheduler.add(
                             context,
                             ScheduledActionItem(
-                                newTaskId(), actionType, target.trim(), message,
+                                newTaskId(), actionType, target.trim(),
+                                if (actionType == "OPEN_APP") appLabel else message,
                                 triggerAt, if (actionType == "WHATSAPP") attachmentUriString else null
                             )
                         )
-                        target = ""; message = ""; attachmentUriString = null
+                        target = ""; message = ""; attachmentUriString = null; appLabel = ""
                         Toast.makeText(context, "Scheduled", Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -491,9 +535,13 @@ fun SchedulerTab(context: Context) {
             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                 Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("${task.actionType} to ${task.target}", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (task.actionType == "OPEN_APP") "Open app: ${task.message.ifBlank { task.target }}"
+                            else "${task.actionType} to ${task.target}",
+                            fontWeight = FontWeight.Bold
+                        )
                         Text(task.timeLabel, fontSize = 12.sp, color = Green)
-                        Text(task.message, fontSize = 12.sp, color = Color.Gray)
+                        if (task.actionType != "OPEN_APP") Text(task.message, fontSize = 12.sp, color = Color.Gray)
                     }
                     IconButton(onClick = { Scheduler.cancel(context, task.id) }) {
                         Icon(Icons.Default.Delete, contentDescription = "Cancel task")
@@ -502,6 +550,57 @@ fun SchedulerTab(context: Context) {
             }
         }
     }
+}
+
+@Composable
+fun AppPickerDialog(context: Context, onPick: (String, String) -> Unit, onDismiss: () -> Unit) {
+    val pm = context.packageManager
+    val apps = remember {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        pm.queryIntentActivities(intent, 0)
+            .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+            .distinctBy { it.second }
+            .filter { it.second != context.packageName }
+            .sortedBy { it.first.lowercase() }
+    }
+    var query by remember { mutableStateOf("") }
+    val shown = remember(query, apps) {
+        if (query.isBlank()) apps else apps.filter { it.first.contains(query.trim(), ignoreCase = true) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        title = { Text("Choose an app") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Search apps") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
+                    items(shown, key = { it.second }) { (label, pkg) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { onPick(pkg, label) }.padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val icon = remember(pkg) {
+                                try { pm.getApplicationIcon(pkg).toBitmap(96, 96).asImageBitmap() } catch (e: Exception) { null }
+                            }
+                            if (icon != null) Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(36.dp))
+                            else Spacer(Modifier.size(36.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Text(label)
+                        }
+                    }
+                }
+            }
+        }
+    )
 }
 
 // ============================================================================
@@ -585,6 +684,7 @@ fun CallsTab(context: Context) {
                                 "This phone blocked the microphone during the call.",
                                 fontSize = 12.sp, color = Color(0xFFB45309)
                             )
+                            if (call.diag.isNotBlank()) Text(call.diag, fontSize = 11.sp, color = Color.Gray)
                         }
                         if (call.transcript.isNotBlank()) {
                             Spacer(Modifier.height(6.dp))
@@ -630,6 +730,8 @@ fun SetupTab(context: Context) {
     var modelName by remember { mutableStateOf(AppSettings.modelName) }
     var ownerName by remember { mutableStateOf(AppSettings.ownerName) }
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
+    var speed by remember { mutableStateOf(AppSettings.speechRate) }
+    var loud by remember { mutableStateOf(AppSettings.loudVoice) }
 
     fun open(intent: Intent) {
         try { context.startActivity(intent) } catch (e: Exception) {
@@ -703,6 +805,40 @@ fun SetupTab(context: Context) {
             onValueChangeFinished = { AppSettings.ringDelaySec = delaySec.toInt() },
             valueRange = 5f..40f
         )
+        Text("Voice speed: ${"%.2f".format(speed)}x (lower is slower)", fontSize = 13.sp)
+        Slider(
+            value = speed,
+            onValueChange = { speed = it },
+            onValueChangeFinished = { AppSettings.speechRate = speed },
+            valueRange = 0.4f..1.2f
+        )
+        SetupButton("Test the voice") {
+            AssistantBridge.foregroundService?.speakBackground(
+                "Hello, this is Equal. This is how fast I will speak on your calls."
+            ) ?: Toast.makeText(context, "Turn the assistant on first", Toast.LENGTH_SHORT).show()
+        }
+        LabeledSwitch("Loud voice for callers (alarm channel)", loud) {
+            loud = it
+            AppSettings.loudVoice = it
+        }
+        Text(
+            "On: the assistant speaks on the alarm channel at full volume, which is the most reliable way for " +
+                "the caller to hear it. Turn off to use the normal call channel.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        Text("4. Offline voice (microphone)", fontWeight = FontWeight.Bold)
+        Text(
+            "Offline mode uses the phone's on-device speech recognizer and the language of your phone's voice " +
+                "input. If it says the offline speech pack is missing, download it here.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        SetupButton("Download offline speech") {
+            val msg = AssistantBridge.foregroundService?.downloadOfflineSpeech()
+                ?: StreamingSpeechHelper(context).downloadOfflineModel()
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+        }
     }
 }
 
