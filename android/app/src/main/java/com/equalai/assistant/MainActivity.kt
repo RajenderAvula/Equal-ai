@@ -648,6 +648,7 @@ fun AppPickerDialog(context: Context, onPick: (String, String) -> Unit, onDismis
 fun CallsTab(context: Context) {
     val scope = rememberCoroutineScope()
     var autoAnswer by remember { mutableStateOf(AppSettings.autoAnswer) }
+    var callerNote by remember { mutableStateOf(AppSettings.callerNote) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
 
@@ -695,6 +696,15 @@ fun CallsTab(context: Context) {
                 Switch(checked = autoAnswer, onCheckedChange = { autoAnswer = it; AppSettings.autoAnswer = it })
             }
         }
+
+        OutlinedTextField(
+            value = callerNote,
+            onValueChange = { callerNote = it; AppSettings.callerNote = it },
+            label = { Text("Custom text for callers (optional)") },
+            placeholder = { Text("e.g. Please also tell me your company name") },
+            supportingText = { Text("Said or asked in the greeting, on top of Gemini's own questions.") },
+            modifier = Modifier.fillMaxWidth()
+        )
 
         Text("Call history", fontWeight = FontWeight.Bold)
         LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -769,6 +779,7 @@ fun SetupTab(context: Context) {
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
+    var waitSec by remember { mutableStateOf(AppSettings.outgoingWaitSec.toFloat()) }
 
     fun open(intent: Intent) {
         try { context.startActivity(intent) } catch (e: Exception) {
@@ -841,6 +852,13 @@ fun SetupTab(context: Context) {
             onValueChange = { delaySec = it },
             onValueChangeFinished = { AppSettings.ringDelaySec = delaySec.toInt() },
             valueRange = 5f..40f
+        )
+        Text("Scheduled call: speak ${waitSec.toInt()}s after dialing if the call timer can't be read", fontSize = 13.sp)
+        Slider(
+            value = waitSec,
+            onValueChange = { waitSec = it },
+            onValueChangeFinished = { AppSettings.outgoingWaitSec = waitSec.toInt() },
+            valueRange = 5f..45f
         )
         Text("Voice speed: ${"%.2f".format(speed)}x (lower is slower)", fontSize = 13.sp)
         Slider(
