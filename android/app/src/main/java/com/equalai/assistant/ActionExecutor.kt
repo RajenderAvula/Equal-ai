@@ -181,6 +181,9 @@ object ActionExecutor {
             "SMS" -> sendSms(ctx, t.target, t.message)
             "WHATSAPP" -> withContext(Dispatchers.Main) { sendWhatsApp(ctx, t.target, t.message, t.attachmentUri) }
             "CALL_SPEAK" -> withContext(Dispatchers.Main) { callAndSpeakOnDevice(ctx, t) }
+            "OPEN_APP" -> withContext(Dispatchers.Main) {
+                if (!openAppByPackageName(ctx, t.target)) AssistantBridge.log("Could not open ${t.message.ifBlank { t.target }}")
+            }
         }
     }
 }
