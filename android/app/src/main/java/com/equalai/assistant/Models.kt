@@ -78,7 +78,8 @@ data class CallRecord(
     val durationSec: Int = 0,
     val recordingFile: String? = null,   // file name inside the app's recordings folder
     val state: String = "DONE",          // ANSWERING | SUMMARIZING | PENDING (waiting for internet) | DONE
-    val audioOk: Boolean = true          // false when the phone blocked the microphone during the call
+    val audioOk: Boolean = true,         // false when the phone blocked the microphone during the call
+    val diag: String = ""               // which microphone sources were tried (shown when audioOk is false)
 ) {
     val hasRecording: Boolean get() = recordingFile != null
     val timeLabel: String
@@ -204,6 +205,16 @@ object AppSettings {
     var ownerName: String
         get() = prefs.getString("owner_name", "") ?: ""
         set(v) { prefs.edit().putString("owner_name", v.trim()).apply() }
+
+    /** Text-to-speech speed: 1.0 is the phone's normal voice, lower is slower. */
+    var speechRate: Float
+        get() = prefs.getFloat("speech_rate_v2", 0.72f)
+        set(v) { prefs.edit().putFloat("speech_rate_v2", v.coerceIn(0.4f, 1.2f)).apply() }
+
+    /** true = the assistant talks on the loud alarm channel during calls (caller hears it best). */
+    var loudVoice: Boolean
+        get() = prefs.getBoolean("loud_voice", true)
+        set(v) { prefs.edit().putBoolean("loud_voice", v).apply() }
 }
 
 object TaskStore {
