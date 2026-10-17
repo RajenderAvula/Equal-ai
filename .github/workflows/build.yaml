@@ -21,6 +21,24 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      # Fails fast with a clear message if the app module isn't where Gradle expects it.
+      - name: Check project layout
+        run: |
+          echo "Repo root:"; ls -la
+          echo "app/ folder:"; ls -la app 2>/dev/null || echo "(no app/ folder)"
+          if [ ! -f app/build.gradle.kts ] && [ ! -f app/build.gradle ]; then
+            echo "::error::app/build.gradle.kts is missing. The repo needs the app/ folder (with build.gradle.kts and src/) at its root."
+            exit 1
+          fi
+          if ! grep -q "com.android.application" app/build.gradle.kts app/build.gradle 2>/dev/null; then
+            echo "::error::app/build.gradle(.kts) does not apply the com.android.application plugin."
+            exit 1
+          fi
+          if [ ! -f app/src/main/AndroidManifest.xml ]; then
+            echo "::error::app/src/main/AndroidManifest.xml is missing."
+            exit 1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -33,14 +51,21 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # Retries because downloads from Maven repositories occasionally fail on CI runners.
+      # Retries only when the failure looks like a flaky download, not a real build error.
       - name: Build debug APK
         run: |
+          set -o pipefail
+          flags=""
           for attempt in 1 2 3; do
-            if gradle :app:assembleDebug --stacktrace --refresh-dependencies; then
+            if gradle :app:assembleDebug --stacktrace $flags 2>&1 | tee build.log; then
               exit 0
             fi
-            echo "Attempt $attempt failed. Retrying in 30 seconds..."
+            if ! grep -qiE "Could not (resolve|GET|HEAD|download)|Read timed out|Connection (reset|refused)|Received status code 5" build.log; then
+              echo "Build failed for a non-network reason; not retrying."
+              exit 1
+            fi
+            echo "Download problem on attempt $attempt. Retrying in 30 seconds..."
+            flags="--refresh-dependencies"
             sleep 30
           done
           exit 1
