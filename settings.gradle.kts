@@ -18,4 +18,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "EqualAI"
+
+// The Android module lives in android/app (not app/) in this repo.
 include(":app")
+project(":app").projectDir = file("android/app")
