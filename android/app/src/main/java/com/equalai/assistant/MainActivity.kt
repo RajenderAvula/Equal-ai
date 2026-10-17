@@ -200,7 +200,9 @@ fun EqualAssistantMainScreen() {
                 IconButton(
                     onClick = {
                         if (universalInput.isNotBlank()) {
-                            val cmd = universalInput.removePrefix("🎤 Listening...").removePrefix("Hearing: ").trim()
+                            // the box may still hold "From WhatsApp: ... -> What next?": keep only what was typed after it
+                            val cmd = universalInput.removePrefix("🎤 Listening...").removePrefix("Hearing: ")
+                                .substringAfterLast("What next?").trim().trimEnd('.')
                             universalInput = ""
                             AssistantBridge.followUpUntil = 0L
                             scope.launch { CommandRouter.handle(context, cmd) }
@@ -258,6 +260,7 @@ fun LabeledSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) 
 
 @Composable
 fun NotificationsTab() {
+    val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Row(
@@ -276,23 +279,57 @@ fun NotificationsTab() {
             }
         }
 
-        Text("Live notifications (${AssistantBridge.notifications.size})", fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Live notifications (${AssistantBridge.notifications.size})", fontWeight = FontWeight.Bold)
+            TextButton(
+                onClick = { AssistantBridge.notifications.clear(); AssistantBridge.latestNotification = null },
+                enabled = AssistantBridge.notifications.isNotEmpty()
+            ) { Text("Clear all") }
+        }
+        Text("Tap a notification to open it. The X removes it here and from your phone's notification bar.", fontSize = 11.sp, color = Color.Gray)
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(AssistantBridge.notifications) { item ->
-                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("${item.appName} • ${item.sender}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                            Text(item.timestamp, color = Color.Gray, fontSize = 11.sp)
+            items(AssistantBridge.notifications.toList()) { item ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable {
+                        if (!ActionExecutor.openNotification(context, item)) {
+                            Toast.makeText(context, "Could not open ${item.appName}", Toast.LENGTH_SHORT).show()
                         }
-                        Spacer(Modifier.height(4.dp))
-                        Text(item.message, fontSize = 13.sp)
+                    },
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Row(modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.Top) {
+                        Column(modifier = Modifier.weight(1f).padding(top = 8.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${item.appName} • ${item.sender}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                Text(item.timestamp, color = Color.Gray, fontSize = 11.sp)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(item.message, fontSize = 13.sp)
+                        }
+                        IconButton(onClick = {
+                            val svc = AssistantBridge.notificationService
+                            if (svc != null) svc.dismissItem(item) else AssistantBridge.notifications.remove(item)
+                        }) { Icon(Icons.Default.Close, contentDescription = "Remove notification", tint = Color.Gray) }
                     }
                 }
             }
         }
 
-        Text("Action & diagnostic log", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Action & diagnostic log", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            TextButton(
+                onClick = { AssistantBridge.commandLogs.clear() },
+                enabled = AssistantBridge.commandLogs.isNotEmpty()
+            ) { Text("Clear log") }
+        }
         LazyColumn(
             modifier = Modifier.fillMaxWidth().height(100.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1E293B)).padding(8.dp)
         ) {
