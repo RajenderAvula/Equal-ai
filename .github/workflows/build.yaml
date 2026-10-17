@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  APP_DIR: android/app
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,17 +28,17 @@ jobs:
       - name: Check project layout
         run: |
           echo "Repo root:"; ls -la
-          echo "app/ folder:"; ls -la app 2>/dev/null || echo "(no app/ folder)"
-          if [ ! -f app/build.gradle.kts ] && [ ! -f app/build.gradle ]; then
-            echo "::error::app/build.gradle.kts is missing. The repo needs the app/ folder (with build.gradle.kts and src/) at its root."
+          echo "$APP_DIR folder:"; ls -la "$APP_DIR" 2>/dev/null || echo "(no $APP_DIR folder)"
+          if [ ! -f "$APP_DIR/build.gradle.kts" ] && [ ! -f "$APP_DIR/build.gradle" ]; then
+            echo "::error::$APP_DIR/build.gradle.kts is missing. The app module (build.gradle.kts and src/) must be in $APP_DIR."
             exit 1
           fi
-          if ! grep -q "com.android.application" app/build.gradle.kts app/build.gradle 2>/dev/null; then
-            echo "::error::app/build.gradle(.kts) does not apply the com.android.application plugin."
+          if ! grep -q "com.android.application" "$APP_DIR/build.gradle.kts" "$APP_DIR/build.gradle" 2>/dev/null; then
+            echo "::error::$APP_DIR/build.gradle(.kts) does not apply the com.android.application plugin."
             exit 1
           fi
-          if [ ! -f app/src/main/AndroidManifest.xml ]; then
-            echo "::error::app/src/main/AndroidManifest.xml is missing."
+          if [ ! -f "$APP_DIR/src/main/AndroidManifest.xml" ]; then
+            echo "::error::$APP_DIR/src/main/AndroidManifest.xml is missing."
             exit 1
           fi
 
@@ -74,5 +77,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: equal-ai-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
