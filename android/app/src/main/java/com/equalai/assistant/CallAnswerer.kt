@@ -46,6 +46,7 @@ private class Session(val id: String, val number: String, val startedAt: Long) {
     @Volatile var degraded = false                    // no Gemini during the call: just take a message
     @Volatile var ended = false
     @Volatile var audioOk = true
+    @Volatile var diag = ""
 }
 
 private data class Turn(val callerSaid: String, val reply: String, val done: Boolean)
@@ -177,8 +178,21 @@ object CallAnswerer {
         }
     }
 
+    private fun diagnostics(s: Session): String {
+        val rec = s.recorder
+        val tried = rec?.sourceLog?.toString()?.trim().orEmpty().ifBlank { "could not be opened." }
+        val a11y = if (AssistantBridge.accessibilityService != null) "on" else "OFF"
+        return "Microphone: $tried Loudest sound heard: ${rec?.maxPeak ?: 0}. Equal AI accessibility service: $a11y."
+    }
+
     private suspend fun finishCall(ctx: Context, s: Session) {
         s.audioOk = (s.recorder?.peak ?: 0) >= MIC_SILENT_PEAK
+        s.diag = diagnostics(s)
+        if ((s.recorder?.aiMixedBytes ?: 0) == 0 && !s.audioOk) {
+            // nothing at all was recorded, so don't keep an empty file
+            try { s.recordingFile?.delete() } catch (e: Exception) { }
+            s.recordingFile = null
+        }
         val base = snapshot(s, "SUMMARIZING", "Summarizing…")
         CallStore.upsert(ctx, base)
         CallSummarizer.process(ctx, base)
@@ -198,7 +212,8 @@ object CallAnswerer {
         durationSec = ((System.currentTimeMillis() - s.startedAt) / 1000).toInt(),
         recordingFile = s.recordingFile?.name,
         state = state,
-        audioOk = s.audioOk
+        audioOk = s.audioOk,
+        diag = s.diag
     )
 
     // ------------------------------------------------------------------ the conversation
@@ -216,9 +231,12 @@ object CallAnswerer {
         s.recorder = rec
         if (rec.start()) {
             s.recordingFile = file
-            AssistantBridge.log("Call answered. Recording via ${rec.sourceName}")
+            AssistantBridge.log(
+                if (rec.sourceName == "none") "Call answered. Microphone blocked: recording the assistant's voice only."
+                else "Call answered. Recording via ${rec.sourceName}"
+            )
         } else {
-            AssistantBridge.log("Could not open the microphone for this call")
+            AssistantBridge.log("Could not start the call recording")
         }
 
         s.callerName = ActionExecutor.resolveCallerName(ctx, s.number)
@@ -229,7 +247,7 @@ object CallAnswerer {
 
         // Speak, then check the microphone heard us. If it is silent, move to another audio source.
         suspend fun say(text: String) {
-            svc.speakAndWait(text)
+            svc.speakIntoCall(text, rec)
             delay(300)
             if (rec.isRunning && rec.peak < MIC_SILENT_PEAK && rec.nextSource()) {
                 AssistantBridge.log("Microphone looks silent. Trying another audio source.")
