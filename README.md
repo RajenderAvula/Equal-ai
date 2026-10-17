@@ -3,7 +3,9 @@
 Android voice assistant (Kotlin + Compose). Everything runs on the phone; the only outside service is the Gemini API with the key you paste in Setup.
 
 ```
-android/   -> copy into your Android Studio project (package com.equalai.assistant)
+app/                       -> the Android module (package com.equalai.assistant)
+build.gradle.kts, settings.gradle.kts, gradle.properties -> Gradle project files (repo root)
+.github/workflows/build.yaml -> CI: builds a debug APK on every push to main
 ```
 
 ## What it does
@@ -20,7 +22,7 @@ android/   -> copy into your Android Studio project (package com.equalai.assista
 
 ## Install
 
-1. Copy everything under `android/app/` into your project (replace the old files; delete the old `MainActivity.kt` and `CloudClient.kt` if you still have them).
+1. Put this folder's contents at the root of your repo (replace the old files; delete the old `MainActivity.kt` and `CloudClient.kt` if you still have them). The GitHub Action builds the APK; download it from the run's Artifacts. Or open the folder in Android Studio.
 2. Build and install the APK. Allow all permissions when asked (microphone, phone, call log, contacts, SMS, notifications).
 3. Open **Setup**:
    - Android 13+ sideload: App info -> ⋮ -> **Allow restricted settings**, then enable Accessibility and Notification listener.
