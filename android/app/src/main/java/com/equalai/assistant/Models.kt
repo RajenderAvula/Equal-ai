@@ -212,6 +212,16 @@ object AppSettings {
         get() = prefs.getFloat("speech_rate_v2", 0.72f)
         set(v) { prefs.edit().putFloat("speech_rate_v2", v.coerceIn(0.4f, 1.2f)).apply() }
 
+    /** Custom text the assistant tells or asks every caller, on top of its normal questions. */
+    var callerNote: String
+        get() = prefs.getString("caller_note", "") ?: ""
+        set(v) { prefs.edit().putString("caller_note", v.trim()).apply() }
+
+    /** Scheduled call: seconds to wait before speaking when the dialer's call timer can't be read. */
+    var outgoingWaitSec: Int
+        get() = prefs.getInt("outgoing_wait", 15)
+        set(v) { prefs.edit().putInt("outgoing_wait", v.coerceIn(5, 45)).apply() }
+
     /** true = the assistant talks on the loud alarm channel during calls (caller hears it best). */
     var loudVoice: Boolean
         get() = prefs.getBoolean("loud_voice", true)
