@@ -315,10 +315,8 @@ object CommandRouter {
                         return
                     }
                     val item = ScheduledActionItem(newTaskId(), type, target, message, millis)
-                    confirm("Schedule $type to $target at ${item.timeLabel}: $message") {
-                        Scheduler.add(ctx, item)
-                        say("Scheduled.")
-                    }
+                    Scheduler.add(ctx, item)
+                    say("Scheduled $type to $target at ${item.timeLabel}.")
                 }
                 else -> say(reply.ifBlank { "Done" })
             }
