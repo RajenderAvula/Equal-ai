@@ -168,6 +168,27 @@ class Utterance(
     }
 }
 
+/** Linear resample of mono PCM16 to 16 kHz. */
+fun resampleTo16k(pcm: ByteArray, rate: Int): ByteArray {
+    if (rate == SAMPLE_RATE) return pcm
+    val inN = pcm.size / 2
+    if (inN < 2) return ByteArray(0)
+    val outN = (inN.toLong() * SAMPLE_RATE / rate).toInt()
+    val out = ByteArray(outN * 2)
+    val bb = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+    val ob = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+    for (i in 0 until outN) {
+        val pos = i.toDouble() * rate / SAMPLE_RATE
+        val i0 = pos.toInt().coerceAtMost(inN - 1)
+        val i1 = (i0 + 1).coerceAtMost(inN - 1)
+        val f = pos - i0
+        val a = bb.getShort(i0 * 2).toInt()
+        val b = bb.getShort(i1 * 2).toInt()
+        ob.putShort(i * 2, (a + (b - a) * f).toInt().toShort())
+    }
+    return out
+}
+
 // ============================================================================
 // In-built call recorder. Runs for the whole call, writes a WAV, and feeds turn capture.
 // ============================================================================
@@ -194,6 +215,8 @@ class CallRecorder(private val outFile: File) {
     @Volatile var capture: Utterance? = null
     @Volatile var peak = 0                 // loudest sample since the current source was opened
     @Volatile var sourceName = "none"
+    @Volatile var maxPeak = 0              // loudest sample over the whole call, any source
+    val sourceLog = StringBuilder()        // what happened with each microphone source
 
     val isRunning: Boolean get() = running
     private val triedAllSources: Boolean get() = sourceIndex >= sources.size - 1
@@ -209,32 +232,61 @@ class CallRecorder(private val outFile: File) {
             sourceIndex++
             val (src, name) = sources[sourceIndex]
             try {
-                val r = AudioRecord(
-                    src, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize
-                )
+                val r = buildRecord(src)
                 if (r.state != AudioRecord.STATE_INITIALIZED) {
                     r.release()
+                    sourceLog.append("$name: blocked. ")
                     continue
                 }
                 r.startRecording()
                 if (r.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                     r.release()
+                    sourceLog.append("$name: would not start. ")
                     continue
                 }
                 record = r
                 sourceName = name
                 peak = 0
+                sourceLog.append("$name: opened. ")
                 return true
             } catch (e: Throwable) {
                 // not allowed on this phone: try the next source
+                sourceLog.append("$name: error. ")
             }
         }
         return false
     }
 
+    /**
+     * On Android 11+ ask for a capture that is NOT privacy-sensitive, so it can run alongside the
+     * phone app's own use of the microphone. Falls back to the plain constructor.
+     */
+    @SuppressLint("MissingPermission")
+    private fun buildRecord(src: Int): AudioRecord {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                return AudioRecord.Builder()
+                    .setAudioSource(src)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize)
+                    .setPrivacySensitive(false)
+                    .build()
+            } catch (e: Throwable) {
+                // fall through to the plain constructor
+            }
+        }
+        return AudioRecord(src, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
+    }
+
     fun start(): Boolean {
         if (running) return true
-        if (!openNext()) return false
+        openNext()                                     // may fail: then only the assistant's side is recorded
         try {
             wav = WavFileWriter(outFile)
         } catch (e: Exception) {
@@ -250,26 +302,75 @@ class CallRecorder(private val outFile: File) {
         return true
     }
 
+    // ---- the assistant's own voice, mixed into the recording (the phone may block the microphone)
+    private val aiLock = Any()
+    private var aiPcm = ByteArray(0)
+    private var aiPos = 0
+    @Volatile var aiMixedBytes = 0
+
+    /** Queue 16 kHz mono PCM16 of the assistant speaking; it is mixed in as the recording runs. */
+    fun addAiAudio(pcm16k: ByteArray) = synchronized(aiLock) {
+        val remaining = aiPcm.size - aiPos
+        val merged = ByteArray(remaining + pcm16k.size)
+        System.arraycopy(aiPcm, aiPos, merged, 0, remaining)
+        System.arraycopy(pcm16k, 0, merged, remaining, pcm16k.size)
+        aiPcm = merged
+        aiPos = 0
+    }
+
+    /** Returns the frame to store in the file: the mic, plus the assistant's voice when the mic didn't hear it. */
+    private fun frameForFile(buf: ByteArray, n: Int, micPeak: Int): ByteArray {
+        val out = buf.copyOf(n)
+        synchronized(aiLock) {
+            val avail = minOf(n, aiPcm.size - aiPos) and 1.inv()
+            if (avail > 0) {
+                if (micPeak < 600) {                   // mic is silent or faint: add our own voice
+                    var i = 0
+                    while (i < avail) {
+                        val m = (out[i].toInt() and 0xFF) or (out[i + 1].toInt() shl 8)
+                        val a = (aiPcm[aiPos + i].toInt() and 0xFF) or (aiPcm[aiPos + i + 1].toInt() shl 8)
+                        val mixed = (m + a).coerceIn(-32768, 32767)
+                        out[i] = (mixed and 0xFF).toByte()
+                        out[i + 1] = ((mixed shr 8) and 0xFF).toByte()
+                        i += 2
+                    }
+                    aiMixedBytes += avail
+                }
+                aiPos += avail
+            }
+        }
+        return out
+    }
+
     private fun loop() {
         val buf = ByteArray(640)                       // 20 ms
         var errors = 0
         while (running) {
             if (switchRequested) {
                 switchRequested = false
+                sourceLog.append("(silent) ")
                 val previous = sourceIndex
                 if (!openNext()) {
                     sourceIndex = previous - 1         // fall back to the source we had
-                    if (!openNext()) { running = false; break }
+                    openNext()
                 }
             }
-            val r = record ?: break
-            val n = try { r.read(buf, 0, buf.size) } catch (e: Exception) { -1 }
+            val r = record
+            val n = if (r == null) {
+                java.util.Arrays.fill(buf, 0)          // no microphone: keep time with silence
+                try { Thread.sleep(20) } catch (e: InterruptedException) { }
+                buf.size
+            } else {
+                try { r.read(buf, 0, buf.size) } catch (e: Exception) { -1 }
+            }
             if (n > 0) {
                 errors = 0
-                wav?.let { w -> if (w.bytes < MAX_WAV_BYTES) w.write(buf, n) }
                 val p = peakOf(buf, n)
                 if (p > peak) peak = p
-                capture?.onFrame(buf, n)
+                if (p > maxPeak) maxPeak = p
+                val out = frameForFile(buf, n, p)
+                wav?.let { w -> if (w.bytes < MAX_WAV_BYTES) w.write(out, n) }
+                capture?.onFrame(buf, n)               // the caller-detector hears the mic only, never our own voice
             } else {
                 errors++
                 if (errors > 100) break
@@ -324,8 +425,13 @@ class CallAudioRoute(ctx: Context) {
     private val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var oldSpeaker = false
     private var oldVolume = -1
+    private var oldAlarm = -1
 
     fun enable() {
+        try {
+            oldAlarm = am.getStreamVolume(AudioManager.STREAM_ALARM)
+            am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
+        } catch (e: Exception) { }
         try {
             oldSpeaker = am.isSpeakerphoneOn
             oldVolume = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
@@ -355,6 +461,7 @@ class CallAudioRoute(ctx: Context) {
         } catch (e: Exception) { }
         try {
             if (oldVolume >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, oldVolume, 0)
+            if (oldAlarm >= 0) am.setStreamVolume(AudioManager.STREAM_ALARM, oldAlarm, 0)
         } catch (e: Exception) { }
     }
 }
