@@ -79,6 +79,27 @@ object ActionExecutor {
         return true
     }
 
+    /** Opens the exact screen the notification points to (e.g. the chat); falls back to the app. */
+    fun openNotification(context: Context, n: AppNotificationItem): Boolean {
+        val pi = n.contentIntent
+        if (pi != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= 34) {
+                    val opts = android.app.ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(
+                        android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    )
+                    pi.send(context, 0, null, null, null, null, opts.toBundle())
+                } else {
+                    pi.send()
+                }
+                return true
+            } catch (e: Exception) {
+                AssistantBridge.log("Notification would not open directly, opening the app instead")
+            }
+        }
+        return openAppByPackageName(context, n.packageName)
+    }
+
     fun openAppByName(context: Context, appName: String): Boolean {
         val clean = appName.lowercase().trim()
         if (clean.isEmpty()) return false
