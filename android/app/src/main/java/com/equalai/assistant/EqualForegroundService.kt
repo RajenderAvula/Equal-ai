@@ -7,15 +7,16 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -32,6 +33,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
@@ -50,7 +54,6 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
-    private var recognizer: SpeechRecognizer? = null
     private val main = Handler(Looper.getMainLooper())
     private var isListening = false
     private var isSpeaking = false
@@ -93,80 +96,31 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
     }
 
     // ---------------------------------------------------------------- speech in
+    // Uses StreamingSpeechHelper: the on-device (offline) recognizer when Offline mode is on or there is
+    // no internet, the cloud recognizer otherwise. No language is forced, so the installed pack is used.
+
+    private var speech: StreamingSpeechHelper? = null
+    private var lastNote = ""
+
+    private fun note(msg: String) {
+        if (msg != lastNote) { lastNote = msg; AssistantBridge.log(msg) }
+    }
 
     private fun initSpeechRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+        val h = StreamingSpeechHelper(this)
+        speech = h
+        if (!h.isAvailable() && !h.isOnDeviceAvailable()) {
             AssistantBridge.log("Speech recognition is not available on this device")
             return
         }
-        try {
-            recognizer?.destroy()
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onResults(results: Bundle?) {
-                        isListening = false
-                        val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                        AssistantBridge.promptInTextBoxCallback?.invoke(text ?: "")
-                        if (!text.isNullOrBlank()) handleSpoken(text)
-                        scheduleRestart(700)
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val t = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                        if (!t.isNullOrBlank()) AssistantBridge.promptInTextBoxCallback?.invoke("Hearing: $t...")
-                    }
-
-                    override fun onError(error: Int) {
-                        isListening = false
-                        when (error) {
-                            SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> scheduleRestart(300)
-                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                                recognizer?.cancel()
-                                scheduleRestart(1500)
-                            }
-                            SpeechRecognizer.ERROR_CLIENT, 11 -> {      // 11 = server disconnected
-                                main.postDelayed({ initSpeechRecognizer() }, 1500)
-                            }
-                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                                AssistantBridge.log("Microphone permission missing")
-                            }
-                            12, 13 -> {                                 // language not supported / unavailable
-                                AssistantBridge.log(
-                                    if (AssistantBridge.offlineMode)
-                                        "Offline speech pack missing: install English (India) offline speech in Google app settings."
-                                    else "Speech language unavailable"
-                                )
-                                scheduleRestart(5000)
-                            }
-                            SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                                AssistantBridge.log("Speech needs network (or turn on Offline mode)")
-                                scheduleRestart(4000)
-                            }
-                            else -> {
-                                AssistantBridge.log("Speech error $error")
-                                scheduleRestart(1500)
-                            }
-                        }
-                    }
-
-                    override fun onReadyForSpeech(params: Bundle?) { isListening = true }
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-            }
-            scheduleRestart(200)
-        } catch (e: Exception) {
-            AssistantBridge.log("Recognizer init error: ${e.localizedMessage}")
-        }
+        scheduleRestart(200)
     }
 
     fun startListeningInternal(playBeep: Boolean) {
         main.post {
             if (isListening || isSpeaking || AssistantBridge.callInProgress) return@post
             if (!AssistantBridge.isContinuousListeningEnabled && !AssistantBridge.forceNextCommand) return@post
+            val h = speech ?: return@post
 
             if (playBeep) {
                 try {
@@ -175,23 +129,43 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
                 AssistantBridge.promptInTextBoxCallback?.invoke("🎤 Listening...")
             }
 
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-                if (AssistantBridge.offlineMode) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            val online = !AssistantBridge.offlineMode && h.isOnline()
+            if (!online && !h.isOnDeviceAvailable() && !AssistantBridge.offlineMode) {
+                note("No internet. Using the offline microphone.")
             }
-            try {
-                recognizer?.startListening(intent)
-                isListening = true
-            } catch (e: Exception) {
-                isListening = false
-                scheduleRestart(1500)
-            }
+            isListening = true
+            h.begin(
+                online = online,
+                partialResults = true,
+                onPartial = { AssistantBridge.promptInTextBoxCallback?.invoke("Hearing: $it...") },
+                onResult = { text ->
+                    isListening = false
+                    lastNote = ""
+                    AssistantBridge.promptInTextBoxCallback?.invoke(text)
+                    if (text.isNotBlank()) handleSpoken(text)
+                    scheduleRestart(700)
+                },
+                onFail = { code, msg ->
+                    isListening = false
+                    when (code) {
+                        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> scheduleRestart(300)
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT, 11 -> {
+                            h.stop()
+                            scheduleRestart(1500)
+                        }
+                        else -> {
+                            note(msg)
+                            scheduleRestart(if (code == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS || code == -1) 8000 else 4000)
+                        }
+                    }
+                },
+                onListeningState = { isListening = it }
+            )
         }
     }
+
+    /** Used by the Setup tab: download the offline speech pack. */
+    fun downloadOfflineSpeech(): String = (speech ?: StreamingSpeechHelper(this)).downloadOfflineModel()
 
     private fun scheduleRestart(delayMs: Long) {
         main.removeCallbacks(restartRunnable)
@@ -231,9 +205,10 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
                 return@post
             }
             main.removeCallbacks(restartRunnable)
-            recognizer?.cancel()
+            speech?.stop()
             isListening = false
             isSpeaking = true
+            tts?.setSpeechRate(AppSettings.speechRate)
             tts?.speak(text.take(3500), TextToSpeech.QUEUE_FLUSH, null, if (listenAfter) "LISTEN_AFTER" else "SPEAK_ONLY")
         }
     }
@@ -248,6 +223,7 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
             tts?.language = Locale.getDefault()
         }
         isTtsReady = true
+        tts?.setSpeechRate(AppSettings.speechRate)
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
             override fun onDone(id: String?) = finished(id)
@@ -283,7 +259,7 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
     /** Pauses the wake-word listener so the microphone is free for the call recorder. */
     fun enterCallMode() {
         main.removeCallbacks(restartRunnable)
-        try { recognizer?.cancel() } catch (e: Exception) { }
+        try { speech?.stop() } catch (e: Exception) { }
         isListening = false
         isSpeaking = false
         tts?.stop()
@@ -305,14 +281,139 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
         callUtterances[id] = done
         try {
             withContext(Dispatchers.Main) {
+                tts?.setSpeechRate(AppSettings.speechRate)
                 val params = Bundle().apply {
                     putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_VOICE_CALL)
                 }
-                tts?.speak(text.take(1500), TextToSpeech.QUEUE_ADD, params, id)
+                // One sentence at a time with a short pause between them, so the caller can follow.
+                val sentences = text.take(1500).split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+                sentences.forEachIndexed { i, sentence ->
+                    val last = i == sentences.lastIndex
+                    tts?.speak(sentence, TextToSpeech.QUEUE_ADD, params, if (last) id else "$id-$i")
+                    if (!last) tts?.playSilentUtterance(450L, TextToSpeech.QUEUE_ADD, "$id-s$i")
+                }
             }
-            withTimeoutOrNull(45_000L) { done.await() }
+            withTimeoutOrNull(60_000L) { done.await() }
         } finally {
             callUtterances.remove(id)
+        }
+    }
+
+    /**
+     * Speaks into a call. The sentence is synthesised to a file, played on the loud channel (alarm
+     * stream by default) so the caller hears it through the telephone microphone, and the same audio is
+     * added to the call recording. Falls back to plain TTS if synthesis fails.
+     */
+    suspend fun speakIntoCall(text: String, rec: CallRecorder?) {
+        if (!isTtsReady || text.isBlank()) return
+        val sentences = text.take(1500).split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+        for (sentence in sentences) {
+            val wav = synthesize(sentence)
+            if (wav == null) {
+                speakAndWait(sentence)
+            } else {
+                val (pcm, rate) = wav
+                rec?.addAiAudio(resampleTo16k(pcm, rate))
+                playPcm(pcm, rate)
+            }
+            delay(550)                                              // a clear pause between sentences
+        }
+    }
+
+    private suspend fun synthesize(sentence: String): Pair<ByteArray, Int>? {
+        val id = "SYN_${System.nanoTime()}"
+        val file = File(cacheDir, "$id.wav")
+        val done = CompletableDeferred<Unit>()
+        callUtterances[id] = done
+        try {
+            val started = withContext(Dispatchers.Main) {
+                tts?.setSpeechRate(AppSettings.speechRate)
+                tts?.synthesizeToFile(sentence, Bundle(), file, id)
+            }
+            if (started != TextToSpeech.SUCCESS) return null
+            withTimeoutOrNull(15_000L) { done.await() } ?: return null
+            return withContext(Dispatchers.IO) { readTtsWav(file) }
+        } finally {
+            callUtterances.remove(id)
+            file.delete()
+        }
+    }
+
+    private fun readTtsWav(f: File): Pair<ByteArray, Int>? {
+        if (!f.exists() || f.length() < 48) return null
+        val b = f.readBytes()
+        if (String(b, 0, 4) != "RIFF") return null
+        val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+        var pos = 12
+        var rate = 22050
+        var channels = 1
+        var bits = 16
+        var dataOff = -1
+        var dataLen = 0
+        while (pos + 8 <= b.size) {
+            val id = String(b, pos, 4)
+            val len = bb.getInt(pos + 4)
+            if (id == "fmt ") {
+                channels = bb.getShort(pos + 10).toInt()
+                rate = bb.getInt(pos + 12)
+                bits = bb.getShort(pos + 22).toInt()
+            } else if (id == "data") {
+                dataOff = pos + 8
+                dataLen = if (len <= 0 || dataOff + len > b.size) b.size - dataOff else len
+                break
+            }
+            if (len < 0) break
+            pos += 8 + len + (len and 1)
+        }
+        if (dataOff < 0 || bits != 16 || dataLen < 200 || rate < 8000) return null
+        var pcm = b.copyOfRange(dataOff, dataOff + dataLen)
+        if (channels == 2) {                                        // keep the left channel
+            val mono = ByteArray(pcm.size / 2)
+            var i = 0
+            var o = 0
+            while (i + 3 < pcm.size) {
+                mono[o] = pcm[i]; mono[o + 1] = pcm[i + 1]
+                i += 4; o += 2
+            }
+            pcm = mono
+        }
+        return pcm to rate
+    }
+
+    private suspend fun playPcm(pcm: ByteArray, rate: Int) = withContext(Dispatchers.IO) {
+        val usage = if (AppSettings.loudVoice) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_VOICE_COMMUNICATION
+        var track: AudioTrack? = null
+        try {
+            val attrs = AudioAttributes.Builder()
+                .setUsage(usage)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val fmt = AudioFormat.Builder()
+                .setSampleRate(rate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            val minBuf = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val t = AudioTrack.Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(fmt)
+                .setBufferSizeInBytes(maxOf(pcm.size, minBuf))
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+            track = t
+            t.setVolume(1.0f)
+            t.write(pcm, 0, pcm.size)
+            t.play()
+            val frames = pcm.size / 2
+            val ms = frames * 1000L / rate
+            val until = System.currentTimeMillis() + ms + 1500L
+            while (System.currentTimeMillis() < until && t.playbackHeadPosition < frames - 100) delay(40)
+            delay(150)
+        } catch (e: Exception) {
+            AssistantBridge.log("Voice playback error: ${e.localizedMessage}")
+        } finally {
+            try { track?.stop() } catch (e: Exception) { }
+            try { track?.release() } catch (e: Exception) { }
         }
     }
 
@@ -359,7 +460,7 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
         if (AssistantBridge.foregroundService === this) AssistantBridge.foregroundService = null
         main.removeCallbacksAndMessages(null)
         scope.cancel()
-        recognizer?.destroy()
+        speech?.stop()
         tts?.shutdown()
         super.onDestroy()
     }
