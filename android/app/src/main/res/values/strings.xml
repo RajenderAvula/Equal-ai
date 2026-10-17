@@ -1,1 +1,4 @@
-
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_desc">Lets Equal AI read what is on screen in any app when you ask, tap or type on your behalf, open apps by voice, and press Send in WhatsApp for messages you scheduled. Password fields are never read.</string>
+</resources>
