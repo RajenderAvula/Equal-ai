@@ -30,7 +30,8 @@ data class AppNotificationItem(
     val sender: String,
     val message: String,
     val timestamp: String,
-    val replyAction: Notification.Action? = null
+    val replyAction: Notification.Action? = null,
+    val contentIntent: android.app.PendingIntent? = null
 )
 
 private val idCounter = AtomicInteger(((System.currentTimeMillis() / 1000) % 1_000_000_000).toInt())
