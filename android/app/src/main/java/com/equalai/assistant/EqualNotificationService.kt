@@ -67,16 +67,18 @@ class EqualNotificationService : NotificationListenerService() {
         )
 
         AssistantBridge.onMain {
-            AssistantBridge.latestNotification = item
+            val svc = AssistantBridge.foregroundService
+            val queued = AssistantBridge.readNotificationsAloud && svc != null
+            if (!queued) AssistantBridge.latestNotification = item     // the queue sets it when it is this one's turn
             AssistantBridge.notifications.add(0, item)
             if (AssistantBridge.notifications.size > 100) {
                 AssistantBridge.notifications.removeAt(AssistantBridge.notifications.lastIndex)
             }
 
-            if (AssistantBridge.readNotificationsAloud) {
-                val spoken = "Notification from $appName. ${item.sender} says: ${item.message}. What would you like to do next?"
+            if (queued) {
+                svc?.announceNotification(item)
+            } else if (AssistantBridge.readNotificationsAloud) {
                 AssistantBridge.promptInTextBoxCallback?.invoke("From $appName: ${item.message} -> What next?")
-                AssistantBridge.foregroundService?.speakBackground(spoken, listenAfter = true)
             }
         }
     }
@@ -91,6 +93,7 @@ class EqualNotificationService : NotificationListenerService() {
     /** Removes one item from Equal's list and from the phone's notification tray. */
     fun dismissItem(item: AppNotificationItem) {
         try { cancelNotification(item.key) } catch (e: Exception) { }
+        AssistantBridge.foregroundService?.notificationHandled()      // let the next waiting notification through
         AssistantBridge.onMain {
             AssistantBridge.notifications.remove(item)
             if (AssistantBridge.latestNotification === item) AssistantBridge.latestNotification = null
