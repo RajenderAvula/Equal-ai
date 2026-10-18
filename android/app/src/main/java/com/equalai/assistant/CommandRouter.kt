@@ -2,6 +2,7 @@ package com.equalai.assistant
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.os.BatteryManager
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -105,6 +106,24 @@ object CommandRouter {
             return
         }
 
+        // ---- 4b. Answers that need no internet ----------------------------------------------
+        if (clean in setOf("what time is it", "what's the time", "what is the time", "time", "tell me the time")) {
+            say("It is " + SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date()))
+            return
+        }
+        if (clean.startsWith("what") && (clean.contains("date") || clean.contains("day is it") || clean.contains("today"))) {
+            say("Today is " + SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date()))
+            return
+        }
+        if (clean.contains("battery")) {
+            val pct = try {
+                (app.getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
+                    .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            } catch (e: Exception) { -1 }
+            say(if (pct in 0..100) "Battery is at $pct percent." else "I can't read the battery level.")
+            return
+        }
+
         // ---- 5. Screen control ---------------------------------------------------------------
         when (clean) {
             "go back", "back" -> { ui("back"); return }
@@ -152,8 +171,9 @@ object CommandRouter {
         }
 
         // ---- 8. Everything else: Gemini (online only) -------------------------------------
-        if (AssistantBridge.offlineMode) {
-            say("Offline mode understands basic commands: open an app, call, text, reply, read notifications, read screen, go back, or dismiss.")
+        if (AssistantBridge.offlineMode || !Net.isOnline(app)) {
+            say("I'm offline, so I understand basic commands: open an app, call, text, reply, read notifications, " +
+                "read screen, time, date, battery, go back, or dismiss.")
             return
         }
         if (AppSettings.apiKey.isBlank()) {
@@ -214,7 +234,7 @@ object CommandRouter {
             say("I can't find any readable text on screen.")
             return
         }
-        if (AssistantBridge.offlineMode || AppSettings.apiKey.isBlank()) {
+        if (AssistantBridge.isOffline() || AppSettings.apiKey.isBlank()) {
             say(text.replace(Regex("\\[[^]]*]\\n?"), "").take(500))
             return
         }
@@ -232,7 +252,7 @@ object CommandRouter {
             say("Nothing new to summarize.")
             return
         }
-        if (AssistantBridge.offlineMode || AppSettings.apiKey.isBlank()) {
+        if (AssistantBridge.isOffline() || AppSettings.apiKey.isBlank()) {
             val latest = notifs.firstOrNull()?.let { "${it.sender} on ${it.appName}: ${it.message}" } ?: "none"
             say("You have ${notifs.size} notifications and ${calls.size} calls. Latest notification: $latest.")
             return
