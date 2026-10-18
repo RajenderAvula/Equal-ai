@@ -44,20 +44,21 @@ object OutgoingCall {
 
     /**
      * Suspends until the other person has answered. If the call drops first, the coroutine is cancelled
-     * by CallAnswerer, so this never returns for an unanswered call.
+     * by CallAnswerer, so this never returns for a call that dropped. Returns true when the call timer was
+     * actually seen, false when the answer is only assumed.
      */
-    suspend fun waitForAnswer() {
+    suspend fun waitForAnswer(): Boolean {
         val a11y = AssistantBridge.accessibilityService
         if (a11y == null) {
             delay(AppSettings.outgoingWaitSec * 1000L)
-            return
+            return false                                   // only assumed: the call log decides afterwards
         }
         val until = System.currentTimeMillis() + WATCH_MS
         while (System.currentTimeMillis() < until) {
-            if (timerVisible(a11y.readAllWindows(maxChars = 4000, includePackages = true))) return
+            if (timerVisible(a11y.readAllWindows(maxChars = 4000, includePackages = true))) return true
             delay(500)
         }
-        // still connected after a minute but no timer seen: the dialer is unreadable, assume answered
+        return false                                       // still connected but no timer seen: assumed
     }
 
     /** Looks for 00:03-style text, but only inside the phone/dialer app (not the status-bar clock). */
