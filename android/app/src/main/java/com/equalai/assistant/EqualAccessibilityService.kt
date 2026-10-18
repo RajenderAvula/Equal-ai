@@ -110,6 +110,18 @@ class EqualAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /** True if any other app's window shows this text (or content description). */
+    fun hasText(text: String): Boolean {
+        val needle = text.trim()
+        if (needle.isEmpty()) return false
+        val roots: List<AccessibilityNodeInfo> = try { windows.mapNotNull { it.root } } catch (e: Exception) { emptyList() }
+        for (root in if (roots.isNotEmpty()) roots else listOfNotNull(rootInActiveWindow)) {
+            if (root.packageName?.toString() == packageName) continue
+            if (root.findAccessibilityNodeInfosByText(needle).isNotEmpty()) return true
+        }
+        return false
+    }
+
     fun typeText(text: String): Boolean {
         val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         val args = Bundle().apply {
