@@ -141,6 +141,15 @@ object AssistantBridge {
     /** True when Offline mode is on, or the phone has no working internet. */
     fun isOffline(): Boolean = offlineMode || (foregroundService?.let { !Net.isOnline(it) } ?: false)
 
+    /** Latest call-engine event, shown on the Calls tab so you can see why a call was or wasn't handled. */
+    var lastCallNote by mutableStateOf("No call handled yet")
+
+    fun callNote(msg: String) {
+        val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
+        onMain { lastCallNote = "$time  $msg" }
+        log(msg)
+    }
+
     fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
     }
@@ -230,6 +239,16 @@ object AppSettings {
         get() = prefs.getFloat("speech_rate_v2", 0.72f)
         set(v) { prefs.edit().putFloat("speech_rate_v2", v.coerceIn(0.4f, 1.2f)).apply() }
 
+    /** true = loudspeaker during calls (default). Turn off to use the earpiece plus the loud alarm channel. */
+    var speakerOn: Boolean
+        get() = prefs.getBoolean("speaker_on", true)
+        set(v) { prefs.edit().putBoolean("speaker_on", v).apply() }
+
+    /** List every call (not just Equal's) in Call history and summarize it when a recording can be found. */
+    var logOtherCalls: Boolean
+        get() = prefs.getBoolean("log_other_calls", true)
+        set(v) { prefs.edit().putBoolean("log_other_calls", v).apply() }
+
     /** Default SIM for calls and texts: 0 = SIM 1, 1 = SIM 2. Used without asking. */
     var defaultSim: Int
         get() = prefs.getInt("default_sim", 0)
@@ -287,6 +306,7 @@ class EqualApp : Application() {
         AssistantBridge.offlineMode = AppSettings.offlineMode
         AssistantBridge.wakeWordRequired = AppSettings.wakeWordRequired
         AssistantBridge.scheduledTasks.addAll(TaskStore.all(this).sortedBy { it.triggerAt })
+        CallVoice.init(this)
         CallStore.recoverInterrupted(this)
         CallStore.purge(this, 30)
         AssistantBridge.callLogs.addAll(CallStore.all(this))
