@@ -350,6 +350,11 @@ fun SchedulerTab(context: Context) {
     var triggerAt by remember { mutableStateOf(System.currentTimeMillis() + 10 * 60_000L) }
     var attachmentUriString by remember { mutableStateOf<String?>(null) }
     var appLabel by remember { mutableStateOf("") }
+    var converse by remember { mutableStateOf(true) }
+    var retries by remember { mutableStateOf(0f) }
+    var gapMin by remember { mutableStateOf(2f) }
+    var fallback by remember { mutableStateOf("") }
+    var simSlot by remember { mutableStateOf(AppSettings.defaultSim) }
     var showAppPicker by remember { mutableStateOf(false) }
 
     if (showAppPicker) {
@@ -392,6 +397,15 @@ fun SchedulerTab(context: Context) {
         }
     }
 
+    val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: Exception) { }
+            attachmentUriString = uri.toString()
+        }
+    }
+
     val audioRecorder = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         result.data?.data?.let { attachmentUriString = it.toString() }
     }
@@ -422,7 +436,7 @@ fun SchedulerTab(context: Context) {
                 FilterChip(
                     selected = actionType == k,
                     onClick = {
-                        if (actionType != k) { target = ""; appLabel = "" }
+                        if (actionType != k) { target = ""; appLabel = ""; attachmentUriString = null }
                         actionType = k
                     },
                     label = { Text(v) }
@@ -467,10 +481,55 @@ fun SchedulerTab(context: Context) {
             OutlinedTextField(
                 value = message,
                 onValueChange = { message = it },
-                label = { Text(if (actionType == "CALL_SPEAK") "Text to speak on the call" else "Message text") },
+                label = { Text(if (actionType == "CALL_SPEAK") "Custom text, spoken after the voice clip" else "Message text") },
                 modifier = Modifier.fillMaxWidth()
             )
     
+        }
+
+        if (actionType == "CALL_SPEAK") {
+            Text("Pre-recorded voice (played first, once they answer)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                IconButton(onClick = { audioPicker.launch(arrayOf("audio/*")) }) {
+                    Icon(Icons.Default.AttachFile, contentDescription = "Choose an audio file")
+                }
+                IconButton(onClick = {
+                    try {
+                        audioRecorder.launch(Intent(MediaStore.Audio.Media.RECORD_SOUND_ACTION))
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "No voice recorder app found", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Icon(Icons.Default.Mic, contentDescription = "Record a voice clip") }
+                if (attachmentUriString != null) {
+                    Text("Voice clip ready", color = Green, fontSize = 12.sp)
+                    TextButton(onClick = { attachmentUriString = null }) { Text("Remove") }
+                } else {
+                    Text("Optional: record one or choose a file", fontSize = 12.sp, color = Color.Gray)
+                }
+            }
+            LabeledSwitch("Assistant talks with them afterwards", converse) { converse = it }
+
+            Text("If not answered, call again ${retries.toInt()} time(s)", fontSize = 13.sp)
+            Slider(value = retries, onValueChange = { retries = it }, valueRange = 0f..10f, steps = 9)
+            if (retries.toInt() > 0) {
+                Text("Wait ${gapMin.toInt()} min between tries", fontSize = 13.sp)
+                Slider(value = gapMin, onValueChange = { gapMin = it }, valueRange = 1f..30f, steps = 28)
+            }
+            OutlinedTextField(
+                value = fallback,
+                onValueChange = { fallback = it },
+                label = { Text("If still not answered, send this text (optional)") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        if (actionType == "CALL_SPEAK" || actionType == "SMS") {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("SIM", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                listOf(0 to "SIM 1", 1 to "SIM 2").forEach { (k, v) ->
+                    FilterChip(selected = simSlot == k, onClick = { simSlot = k }, label = { Text(v) })
+                }
+            }
         }
 
         if (actionType == "WHATSAPP") {
@@ -549,16 +608,35 @@ fun SchedulerTab(context: Context) {
                     triggerAt <= System.currentTimeMillis() + 5_000L ->
                         Toast.makeText(context, "Pick a time in the future", Toast.LENGTH_SHORT).show()
                     else -> {
-                        Scheduler.add(
-                            context,
-                            ScheduledActionItem(
-                                newTaskId(), actionType, target.trim(),
-                                if (actionType == "OPEN_APP") appLabel else message,
-                                triggerAt, if (actionType == "WHATSAPP") attachmentUriString else null
+                        val id = newTaskId()
+                        val clipPath = when (actionType) {
+                            "WHATSAPP" -> attachmentUriString
+                            "CALL_SPEAK" -> attachmentUriString?.let { copyClip(context, Uri.parse(it), id) }
+                            else -> null
+                        }
+                        if (actionType == "CALL_SPEAK" && attachmentUriString != null && clipPath == null) {
+                            Toast.makeText(context, "Could not read that voice clip", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val isCall = actionType == "CALL_SPEAK"
+                            Scheduler.add(
+                                context,
+                                ScheduledActionItem(
+                                    id = id,
+                                    actionType = actionType,
+                                    target = target.trim(),
+                                    message = if (actionType == "OPEN_APP") appLabel else message,
+                                    triggerAt = triggerAt,
+                                    attachmentUri = clipPath,
+                                    converse = converse,
+                                    simSlot = simSlot,
+                                    retries = if (isCall) retries.toInt() else 0,
+                                    retryGapMin = gapMin.toInt(),
+                                    fallbackText = if (isCall) fallback.trim() else ""
+                                )
                             )
-                        )
-                        target = ""; message = ""; attachmentUriString = null; appLabel = ""
-                        Toast.makeText(context, "Scheduled", Toast.LENGTH_SHORT).show()
+                            target = ""; message = ""; attachmentUriString = null; appLabel = ""; fallback = ""
+                            Toast.makeText(context, "Scheduled", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             },
@@ -573,12 +651,25 @@ fun SchedulerTab(context: Context) {
                 Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            if (task.actionType == "OPEN_APP") "Open app: ${task.message.ifBlank { task.target }}"
-                            else "${task.actionType} to ${task.target}",
+                            when (task.actionType) {
+                                "OPEN_APP" -> "Open app: ${task.message.ifBlank { task.target }}"
+                                "CALL_SPEAK" -> "Call ${task.target} · SIM ${task.simSlot + 1}"
+                                "SMS" -> "SMS to ${task.target} · SIM ${task.simSlot + 1}"
+                                else -> "${task.actionType} to ${task.target}"
+                            },
                             fontWeight = FontWeight.Bold
                         )
                         Text(task.timeLabel, fontSize = 12.sp, color = Green)
                         if (task.actionType != "OPEN_APP") Text(task.message, fontSize = 12.sp, color = Color.Gray)
+                        if (task.actionType == "CALL_SPEAK") {
+                            val extras = buildList {
+                                if (task.attachmentUri != null) add("voice clip")
+                                if (task.converse) add("assistant talks")
+                                if (task.retries > 0) add("${task.retries} retries")
+                                if (task.fallbackText.isNotBlank()) add("fallback text")
+                            }.joinToString(" · ")
+                            if (extras.isNotBlank()) Text(extras, fontSize = 11.sp, color = Color.Gray)
+                        }
                     }
                     IconButton(onClick = { Scheduler.cancel(context, task.id) }) {
                         Icon(Icons.Default.Delete, contentDescription = "Cancel task")
@@ -638,6 +729,18 @@ fun AppPickerDialog(context: Context, onPick: (String, String) -> Unit, onDismis
             }
         }
     )
+}
+
+private fun copyClip(ctx: Context, uri: Uri, id: Int): String? {
+    return try {
+        val dir = File(ctx.filesDir, "clips").apply { mkdirs() }
+        val out = File(dir, "clip_$id.audio")
+        val input = ctx.contentResolver.openInputStream(uri) ?: return null
+        input.use { i -> out.outputStream().use { o -> i.copyTo(o) } }
+        if (out.length() > 0) out.absolutePath else null
+    } catch (e: Exception) {
+        null
+    }
 }
 
 // ============================================================================
@@ -779,6 +882,7 @@ fun SetupTab(context: Context) {
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
+    var defSim by remember { mutableStateOf(AppSettings.defaultSim) }
     var waitSec by remember { mutableStateOf(AppSettings.outgoingWaitSec.toFloat()) }
 
     fun open(intent: Intent) {
@@ -846,6 +950,12 @@ fun SetupTab(context: Context) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        Text("Default SIM for calls and texts (used without asking)", fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0 to "SIM 1", 1 to "SIM 2").forEach { (k, v) ->
+                FilterChip(selected = defSim == k, onClick = { defSim = k; AppSettings.defaultSim = k }, label = { Text(v) })
+            }
+        }
         Text("Answer after ${delaySec.toInt()} seconds of ringing", fontSize = 13.sp)
         Slider(
             value = delaySec,
@@ -853,7 +963,12 @@ fun SetupTab(context: Context) {
             onValueChangeFinished = { AppSettings.ringDelaySec = delaySec.toInt() },
             valueRange = 5f..40f
         )
-        Text("Scheduled call: speak ${waitSec.toInt()}s after dialing if the call timer can't be read", fontSize = 13.sp)
+        Text(
+            "Scheduled calls: with the accessibility service on, Equal sees when the other person answers and " +
+                "retries if nobody does. Without it, it assumes an answer after the seconds below.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        Text("Scheduled call: assume answered ${waitSec.toInt()}s after dialing if the call timer can't be read", fontSize = 13.sp)
         Slider(
             value = waitSec,
             onValueChange = { waitSec = it },
