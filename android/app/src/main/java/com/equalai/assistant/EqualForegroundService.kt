@@ -11,6 +11,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
@@ -317,6 +318,29 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
                 playPcm(pcm, rate)
             }
             delay(550)                                              // a clear pause between sentences
+        }
+    }
+
+    /** Plays a pre-recorded voice clip into the call (loud channel) and returns when it ends. */
+    suspend fun playClip(path: String) = withContext(Dispatchers.Main) {
+        val done = CompletableDeferred<Unit>()
+        val mp = MediaPlayer()
+        try {
+            val usage = if (AppSettings.loudVoice) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_VOICE_COMMUNICATION
+            mp.setAudioAttributes(
+                AudioAttributes.Builder().setUsage(usage).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+            )
+            mp.setDataSource(path)
+            mp.setOnCompletionListener { done.complete(Unit) }
+            mp.setOnErrorListener { _, _, _ -> done.complete(Unit); true }
+            mp.prepare()
+            mp.setVolume(1f, 1f)
+            mp.start()
+            withTimeoutOrNull(120_000L) { done.await() }
+        } catch (e: Exception) {
+            AssistantBridge.log("Could not play the voice clip: ${e.localizedMessage}")
+        } finally {
+            try { mp.release() } catch (e: Exception) { }
         }
     }
 
