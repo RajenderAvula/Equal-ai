@@ -33,9 +33,9 @@ object GeminiClient {
     suspend fun generate(prompt: String, json: Boolean = false): String? =
         call(JSONArray().put(JSONObject().put("text", prompt)), json, 25_000)
 
-    suspend fun generateWithAudio(prompt: String, wav: ByteArray, json: Boolean = true): String? {
+    suspend fun generateWithAudio(prompt: String, wav: ByteArray, json: Boolean = true, mime: String = "audio/wav"): String? {
         val inline = JSONObject()
-            .put("mimeType", "audio/wav")
+            .put("mimeType", mime)
             .put("data", Base64.encodeToString(wav, Base64.NO_WRAP))
         val parts = JSONArray()
             .put(JSONObject().put("text", prompt))
