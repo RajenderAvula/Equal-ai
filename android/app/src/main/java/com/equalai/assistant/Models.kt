@@ -47,7 +47,7 @@ data class ScheduledActionItem(
     val converse: Boolean = true,        // CALL_SPEAK: assistant keeps talking with Gemini after the clip + text
     val simSlot: Int = 0,                // 0 = SIM 1, 1 = SIM 2 (calls and texts)
     val retries: Int = 0,                // CALL_SPEAK: extra attempts left when nobody answers
-    val retryGapMin: Int = 2,            // minutes between attempts
+    val retryGapSec: Int = 120,          // seconds before calling again (0 = right away)
     val fallbackText: String = ""        // sent by SMS when nobody answered after all attempts
 ) {
     val timeLabel: String
@@ -63,7 +63,7 @@ data class ScheduledActionItem(
         .put("conv", converse)
         .put("sim", simSlot)
         .put("retries", retries)
-        .put("gap", retryGapMin)
+        .put("gapS", retryGapSec)
         .put("fb", fallbackText)
 
     companion object {
@@ -77,7 +77,7 @@ data class ScheduledActionItem(
             converse = o.optBoolean("conv", true),
             simSlot = o.optInt("sim", 0),
             retries = o.optInt("retries", 0),
-            retryGapMin = o.optInt("gap", 2),
+            retryGapSec = if (o.has("gapS")) o.optInt("gapS", 120) else o.optInt("gap", 2) * 60,
             fallbackText = o.optString("fb", "")
         )
     }
@@ -137,6 +137,9 @@ object AssistantBridge {
     var accessibilityService: EqualAccessibilityService? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** True when Offline mode is on, or the phone has no working internet. */
+    fun isOffline(): Boolean = offlineMode || (foregroundService?.let { !Net.isOnline(it) } ?: false)
 
     fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
