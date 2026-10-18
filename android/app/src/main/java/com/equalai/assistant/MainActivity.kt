@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -39,11 +40,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -235,6 +238,22 @@ fun EqualAssistantMainScreen() {
 
             Spacer(Modifier.height(8.dp))
 
+            var online by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    online = Net.isOnline(context)
+                    delay(5_000)
+                }
+            }
+            if (AssistantBridge.offlineMode || !online) {
+                Text(
+                    "Working offline: voice commands, call messages, scheduled calls and texts and notifications " +
+                        "still work. Gemini replies and summaries resume when internet returns.",
+                    fontSize = 12.sp, color = Color(0xFFB45309)
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+
             when (selectedTab) {
                 0 -> NotificationsTab()
                 1 -> SchedulerTab(context)
@@ -352,7 +371,7 @@ fun SchedulerTab(context: Context) {
     var appLabel by remember { mutableStateOf("") }
     var converse by remember { mutableStateOf(true) }
     var retries by remember { mutableStateOf(0f) }
-    var gapMin by remember { mutableStateOf(2f) }
+    var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
     var simSlot by remember { mutableStateOf(AppSettings.defaultSim) }
     var showAppPicker by remember { mutableStateOf(false) }
@@ -512,8 +531,19 @@ fun SchedulerTab(context: Context) {
             Text("If not answered, call again ${retries.toInt()} time(s)", fontSize = 13.sp)
             Slider(value = retries, onValueChange = { retries = it }, valueRange = 0f..10f, steps = 9)
             if (retries.toInt() > 0) {
-                Text("Wait ${gapMin.toInt()} min between tries", fontSize = 13.sp)
-                Slider(value = gapMin, onValueChange = { gapMin = it }, valueRange = 1f..30f, steps = 28)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("0" to "Immediately", "30" to "30 s", "120" to "2 min", "300" to "5 min").forEach { (v, label) ->
+                        FilterChip(selected = gapSec == v, onClick = { gapSec = v }, label = { Text(label) })
+                    }
+                }
+                OutlinedTextField(
+                    value = gapSec,
+                    onValueChange = { gapSec = it.filter { c -> c.isDigit() }.take(4) },
+                    label = { Text("Seconds before calling again (0 = immediately)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
             OutlinedTextField(
                 value = fallback,
@@ -630,7 +660,7 @@ fun SchedulerTab(context: Context) {
                                     converse = converse,
                                     simSlot = simSlot,
                                     retries = if (isCall) retries.toInt() else 0,
-                                    retryGapMin = gapMin.toInt(),
+                                    retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
                                     fallbackText = if (isCall) fallback.trim() else ""
                                 )
                             )
