@@ -961,6 +961,8 @@ fun SetupTab(context: Context) {
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
     var speakerOn by remember { mutableStateOf(AppSettings.speakerOn) }
     var logCalls by remember { mutableStateOf(AppSettings.logOtherCalls) }
+    var recMode by remember { mutableStateOf(AppSettings.phoneRecorder) }
+    var recNote by remember { mutableStateOf("") }
     var defSim by remember { mutableStateOf(AppSettings.defaultSim) }
     var waitSec by remember { mutableStateOf(AppSettings.outgoingWaitSec.toFloat()) }
     var voiceStatus by remember { mutableStateOf("") }
@@ -1218,6 +1220,20 @@ fun SetupTab(context: Context) {
                 "switching this off: on some phones the speaker cancels the assistant's own voice out of the call.",
             fontSize = 12.sp, color = Color.Gray
         )
+        Text("Phone's own call recorder", fontWeight = FontWeight.SemiBold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0 to "Leave alone", 1 to "ON in calls", 2 to "OFF in calls").forEach { (k, v) ->
+                FilterChip(selected = recMode == k, onClick = { recMode = k; AppSettings.phoneRecorder = k }, label = { Text(v) })
+            }
+        }
+        Text(
+            "Equal presses Record or Stop recording in your phone app during every call. Needs the Accessibility service " +
+                "and a phone app that has a call recorder. Android gives apps no direct switch for it. If the recorder " +
+                "starts by itself, also turn off automatic recording in the phone's own settings.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        OutlinedButton(onClick = { recNote = PhoneRecorder.openPhoneSettings(context) }) { Text("Open phone call settings") }
+        if (recNote.isNotBlank()) Text(recNote, fontSize = 12.sp, color = Green)
     }
 }
 
