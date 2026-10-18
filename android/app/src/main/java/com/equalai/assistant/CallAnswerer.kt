@@ -49,6 +49,7 @@ private class Session(val id: String, val number: String, val startedAt: Long) {
     @Volatile var diag = ""
     @Volatile var plan: OutPlan? = null               // set for scheduled outgoing calls
     @Volatile var answered = false                    // outgoing: the other person picked up
+    @Volatile var assumed = false                     // outgoing: "answered" was only assumed, not seen
 }
 
 private data class Turn(val callerSaid: String, val reply: String, val done: Boolean)
@@ -71,6 +72,7 @@ object CallAnswerer {
     private var ringNumber: String? = null
     private var answerRunnable: Runnable? = null
     private var weAnswered = false
+    private var callMark = 0L                      // when the current call started ringing / dialing
     private var session: Session? = null
 
     private fun granted(ctx: Context, perm: String) =
@@ -85,24 +87,29 @@ object CallAnswerer {
                 if (!number.isNullOrBlank()) ringNumber = number
                 if (ringing) return
                 ringing = true
-                if (!AppSettings.autoAnswer) return
-                if (AssistantBridge.foregroundService == null) {
-                    AssistantBridge.log("Auto-answer skipped: open Equal AI once so the voice service is running.")
+                callMark = System.currentTimeMillis()
+                if (!AppSettings.autoAnswer) {
+                    AssistantBridge.callNote("Incoming call. Auto-answer is switched off (Calls tab).")
                     return
                 }
-                if (!granted(ctx, Manifest.permission.ANSWER_PHONE_CALLS) ||
-                    !granted(ctx, Manifest.permission.RECORD_AUDIO)
-                ) {
-                    AssistantBridge.log("Auto-answer skipped: phone or microphone permission missing.")
+                if (!granted(ctx, Manifest.permission.ANSWER_PHONE_CALLS)) {
+                    AssistantBridge.callNote("Auto-answer skipped: allow the Phone permission (Setup).")
                     return
+                }
+                CallVoice.init(ctx)                                   // warm up the voice engine
+                if (AssistantBridge.foregroundService == null) {
+                    try {
+                        ContextCompat.startForegroundService(ctx, Intent(ctx, EqualForegroundService::class.java))
+                    } catch (e: Exception) { }
                 }
                 val r = Runnable { answer(ctx) }
                 answerRunnable = r
                 main.postDelayed(r, AppSettings.ringDelaySec * 1000L)
-                AssistantBridge.log("Incoming call: Equal answers in ${AppSettings.ringDelaySec}s unless you pick up.")
+                AssistantBridge.callNote("Incoming call: Equal answers in ${AppSettings.ringDelaySec}s unless you pick up.")
             }
 
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
+                if (callMark == 0L) callMark = System.currentTimeMillis()
                 cancelPendingAnswer()
                 if (weAnswered && session == null) startSession(ctx)
                 else if (!weAnswered) OutgoingCall.onOffHook(ctx.applicationContext)
@@ -112,9 +119,21 @@ object CallAnswerer {
                 OutgoingCall.onIdle()
                 ringing = false
                 cancelPendingAnswer()
+                val handledByEqual = weAnswered || session != null
+                val mark = callMark
                 session?.let { endSession(ctx, it) }
                 weAnswered = false
                 ringNumber = null
+                callMark = 0L
+                if (!handledByEqual && mark > 0L) {
+                    // a call you answered, dialed or missed yourself: list it and summarize it if possible
+                    val app = ctx.applicationContext
+                    scope.launch {
+                        try { CallLogSummarizer.handle(app, mark) } catch (e: Exception) {
+                            AssistantBridge.log("Call log error: ${e.localizedMessage}")
+                        }
+                    }
+                }
             }
         }
     }
@@ -133,7 +152,7 @@ object CallAnswerer {
             (ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager).acceptRingingCall()
         } catch (e: Exception) {
             weAnswered = false
-            AssistantBridge.log("Could not answer the call: ${e.localizedMessage}")
+            AssistantBridge.callNote("Could not answer the call: ${e.localizedMessage}")
         }
     }
 
@@ -174,6 +193,7 @@ object CallAnswerer {
             s.job?.cancelAndJoin()
             val svc = AssistantBridge.foregroundService
             svc?.stopSpeakingNow()
+            CallVoice.stop()
             s.recorder?.stop()
             s.route?.restore()
             AssistantBridge.callInProgress = false
@@ -191,6 +211,9 @@ object CallAnswerer {
 
     private suspend fun finishCall(ctx: Context, s: Session) {
         val plan = s.plan
+        if (plan != null && s.answered && s.assumed && !callLogSaysAnswered(ctx, s)) {
+            s.answered = false                                    // the call log shows nobody picked up
+        }
         if (plan != null && !s.answered) {
             handleNoAnswer(ctx, s, plan)
             return
@@ -216,10 +239,7 @@ object CallAnswerer {
 
     fun startOutbound(ctx: Context, plan: OutPlan) {
         if (session != null) return
-        if (AssistantBridge.foregroundService == null) {
-            AssistantBridge.log("Scheduled call dialing, but the voice service isn't running. Open Equal AI once.")
-            return
-        }
+        CallVoice.init(ctx)
         val s = Session(UUID.randomUUID().toString(), plan.number, System.currentTimeMillis())
         s.plan = plan
         session = s
@@ -233,6 +253,21 @@ object CallAnswerer {
                 AssistantBridge.log("Scheduled call error: ${e.localizedMessage}")
             }
         }
+    }
+
+    /**
+     * When the answer was only assumed (no accessibility timer), the phone's call log tells the truth:
+     * a call nobody picked up has a talk time of 0 seconds.
+     */
+    private suspend fun callLogSaysAnswered(ctx: Context, s: Session): Boolean {
+        if (!CallLogReader.canRead(ctx)) return true
+        delay(3_000)
+        repeat(3) {
+            val e = CallLogReader.latest(ctx, s.startedAt, outgoingOnly = true)
+            if (e != null) return e.durationSec > 0
+            delay(2_000)
+        }
+        return true
     }
 
     /** Nobody picked up: try again later, or after the last attempt send the fallback text. */
@@ -269,9 +304,10 @@ object CallAnswerer {
     }
 
     private suspend fun runOutbound(ctx: Context, s: Session, plan: OutPlan) {
-        val svc = AssistantBridge.foregroundService ?: return
+        val svc = AssistantBridge.foregroundService
         val task = plan.task
-        withContext(Dispatchers.Main) { svc.enterCallMode() }
+        CallVoice.init(ctx)
+        if (svc != null) withContext(Dispatchers.Main) { svc.enterCallMode() }
 
         val route = CallAudioRoute(ctx)
         s.route = route
@@ -285,24 +321,27 @@ object CallAnswerer {
         s.callerName = ActionExecutor.resolveCallerName(ctx, s.number)
         CallStore.upsert(ctx, snapshot(s, "ANSWERING", "Calling…"))
 
-        OutgoingCall.waitForAnswer()                       // cancelled here if the call drops unanswered
+        val sawTimer = OutgoingCall.waitForAnswer()        // cancelled here if the call drops unanswered
         s.answered = true
-        AssistantBridge.log("Scheduled call answered.")
+        s.assumed = !sawTimer
+        AssistantBridge.callNote(if (sawTimer) "Scheduled call answered." else "Scheduled call: speaking now (answer assumed).")
         CallStore.upsert(ctx, snapshot(s, "ANSWERING", "Call in progress…"))
-        delay(900)
+        delay(600)
+        route.ensureSpeaker()
+        delay(500)
 
         // 1. pre-recorded voice clip
         val clip = task.attachmentUri?.let { File(it) }?.takeIf { it.exists() }
         if (clip != null) {
             s.lines.add("Assistant: [pre-recorded voice message]")
-            svc.playClip(clip.path)
+            CallVoice.playClip(clip.path)?.let { AssistantBridge.callNote(it) }
             delay(500)
         }
         // 2. custom text
         val text = task.message.trim()
         if (text.isNotBlank()) {
             s.lines.add("Assistant: $text")
-            sayInto(svc, rec, text)
+            sayInto(rec, text)
         }
 
         // 3. conversation with Gemini
@@ -331,11 +370,11 @@ object CallAnswerer {
                 if (result.callerSaid.isNotBlank()) s.lines.add("Caller: ${result.callerSaid}")
                 if (result.reply.isNotBlank()) {
                     s.lines.add("Assistant: ${result.reply}")
-                    sayInto(svc, rec, result.reply)
+                    sayInto(rec, result.reply)
                 }
                 if (result.done) { closed = true; break }
             }
-            if (!closed) sayInto(svc, rec, "Thank you. Goodbye.")
+            if (!closed) sayInto(rec, "Thank you. Goodbye.")
         }
         delay(2_000)
         hangUp(ctx)
@@ -344,8 +383,8 @@ object CallAnswerer {
     }
 
     /** Speaks into the call; if the microphone looks silent afterwards, tries another audio source. */
-    private suspend fun sayInto(svc: EqualForegroundService, rec: CallRecorder, text: String) {
-        svc.speakIntoCall(text, rec)
+    private suspend fun sayInto(rec: CallRecorder, text: String) {
+        CallVoice.speakIntoCall(text, rec)?.let { AssistantBridge.callNote(it) }
         delay(300)
         if (rec.isRunning && rec.peak < MIC_SILENT_PEAK && rec.nextSource()) delay(400)
     }
@@ -368,8 +407,9 @@ object CallAnswerer {
     // ------------------------------------------------------------------ the conversation
 
     private suspend fun runConversation(ctx: Context, s: Session) {
-        val svc = AssistantBridge.foregroundService ?: return
-        withContext(Dispatchers.Main) { svc.enterCallMode() }
+        val svc = AssistantBridge.foregroundService
+        CallVoice.init(ctx)
+        if (svc != null) withContext(Dispatchers.Main) { svc.enterCallMode() }
 
         val route = CallAudioRoute(ctx)
         s.route = route
@@ -380,7 +420,7 @@ object CallAnswerer {
         s.recorder = rec
         if (rec.start()) {
             s.recordingFile = file
-            AssistantBridge.log(
+            AssistantBridge.callNote(
                 if (rec.sourceName == "none") "Call answered. Microphone blocked: recording the assistant's voice only."
                 else "Call answered. Recording via ${rec.sourceName}"
             )
@@ -396,7 +436,7 @@ object CallAnswerer {
 
         // Speak, then check the microphone heard us. If it is silent, move to another audio source.
         suspend fun say(text: String) {
-            svc.speakIntoCall(text, rec)
+            CallVoice.speakIntoCall(text, rec)?.let { AssistantBridge.callNote(it) }
             delay(300)
             if (rec.isRunning && rec.peak < MIC_SILENT_PEAK && rec.nextSource()) {
                 AssistantBridge.log("Microphone looks silent. Trying another audio source.")
@@ -406,6 +446,7 @@ object CallAnswerer {
         }
 
         delay(700)                                        // let the audio route settle
+        route.ensureSpeaker()
         val note = AppSettings.callerNote
         val greeting = if (s.degraded) {
             "Hello, this is Equal, the AI assistant for $owner. This call is being recorded. " +
