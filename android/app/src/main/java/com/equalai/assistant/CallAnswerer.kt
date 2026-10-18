@@ -242,14 +242,22 @@ object CallAnswerer {
         val t = plan.task
         val note: String
         if (t.retries > 0) {
-            val next = t.copy(
-                id = newTaskId(),
-                triggerAt = System.currentTimeMillis() + t.retryGapMin * 60_000L,
-                retries = t.retries - 1
-            )
-            Scheduler.add(ctx, next)
-            note = "No answer. Calling again in ${t.retryGapMin} min (${t.retries} more " +
-                (if (t.retries == 1) "try" else "tries") + " left)."
+            val gap = t.retryGapSec.coerceAtLeast(0)
+            val waitMs = maxOf(gap, 2) * 1000L                  // at least 2 s so the line can settle
+            val next = t.copy(id = newTaskId(), triggerAt = System.currentTimeMillis() + waitMs, retries = t.retries - 1)
+            if (gap <= 120) {
+                // short gaps are dialed straight from here, because alarms can run late
+                scope.launch {
+                    delay(waitMs)
+                    try { ActionExecutor.executeTask(ctx, next) } catch (e: Exception) {
+                        AssistantBridge.log("Redial failed: ${e.localizedMessage}")
+                    }
+                }
+            } else {
+                Scheduler.add(ctx, next)
+            }
+            note = "No answer. Calling again " + (if (gap == 0) "immediately" else "in $gap s") +
+                " (${t.retries} more " + (if (t.retries == 1) "try" else "tries") + " left)."
         } else if (t.fallbackText.isNotBlank()) {
             ActionExecutor.sendSms(ctx, t.target, t.fallbackText, t.simSlot)
             note = "No answer after all tries. Your message was sent by text."
