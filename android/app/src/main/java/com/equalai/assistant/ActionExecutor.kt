@@ -11,6 +11,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
 import android.provider.ContactsContract
+import android.telecom.PhoneAccountHandle
+import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import android.telecom.TelecomManager
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
@@ -127,14 +130,54 @@ object ActionExecutor {
         return targetPkg != null && openAppByPackageName(context, targetPkg)
     }
 
-    fun makePhoneCall(context: Context, target: String) {
+    // ---- SIM selection (0 = SIM 1, 1 = SIM 2) ---------------------------------------------------
+
+    @Suppress("MissingPermission")
+    fun subscriptionIdFor(context: Context, slot: Int): Int? {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return null
+        return try {
+            val sm = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+            val subs = sm.activeSubscriptionInfoList.orEmpty().sortedBy { it.simSlotIndex }
+            (subs.firstOrNull { it.simSlotIndex == slot } ?: subs.getOrNull(slot))?.subscriptionId
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    @Suppress("MissingPermission")
+    fun phoneAccountFor(context: Context, slot: Int): PhoneAccountHandle? {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return null
+        return try {
+            val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            val accounts = tm.callCapablePhoneAccounts
+            val subId = subscriptionIdFor(context, slot)
+            if (subId != null) {
+                accounts.firstOrNull { h ->
+                    h.id == subId.toString() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && try {
+                        (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+                            .createForPhoneAccountHandle(h)?.subscriptionId == subId
+                    } catch (e: Exception) { false })
+                } ?: accounts.getOrNull(slot)
+            } else {
+                accounts.getOrNull(slot)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun makePhoneCall(context: Context, target: String, simSlot: Int = AppSettings.defaultSim) {
         val number = resolveContactNumber(context, target)
+        val account = phoneAccountFor(context, simSlot)
+        if (account == null) AssistantBridge.log("SIM ${simSlot + 1} not found: using the phone's default SIM")
         val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         if (hasPerm) {
             // placeCall needs no screen and no tap, so it works from a background alarm
             try {
+                val extras = Bundle()
+                if (account != null) extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, account)
                 (context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager)
-                    .placeCall(Uri.fromParts("tel", number, null), Bundle())
+                    .placeCall(Uri.fromParts("tel", number, null), extras)
                 return
             } catch (e: Exception) {
                 AssistantBridge.log("Direct call failed (${e.localizedMessage}), trying the dialer")
@@ -143,14 +186,19 @@ object ActionExecutor {
             AssistantBridge.log("Phone permission missing: the dialer will open. Allow Phone in app settings.")
         }
         val action = if (hasPerm) Intent.ACTION_CALL else Intent.ACTION_DIAL
-        launch(context, Intent(action, Uri.parse("tel:" + Uri.encode(number))))
+        launch(context, Intent(action, Uri.parse("tel:" + Uri.encode(number))).apply {
+            if (account != null) putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, account)
+        })
     }
 
     @Suppress("DEPRECATION")
-    fun sendSms(context: Context, target: String, message: String) {
+    fun sendSms(context: Context, target: String, message: String, simSlot: Int = AppSettings.defaultSim) {
         val number = resolveContactNumber(context, target)
         try {
-            val sms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val subId = subscriptionIdFor(context, simSlot)
+            val sms = if (subId != null) {
+                SmsManager.getSmsManagerForSubscriptionId(subId)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 context.getSystemService(SmsManager::class.java)
             } else {
                 SmsManager.getDefault()
@@ -199,14 +247,14 @@ object ActionExecutor {
 
     /** Scheduled call: place it, then speak the custom text as soon as the other person answers. */
     private fun callAndSpeakOnDevice(context: Context, task: ScheduledActionItem) {
-        OutgoingCall.arm(task.message)
-        makePhoneCall(context, task.target)
+        OutgoingCall.arm(OutPlan(task, resolveContactNumber(context, task.target)))
+        makePhoneCall(context, task.target, task.simSlot)
     }
 
     suspend fun executeTask(ctx: Context, t: ScheduledActionItem) {
         AssistantBridge.log("Running scheduled ${t.actionType} -> ${t.target}")
         when (t.actionType) {
-            "SMS" -> sendSms(ctx, t.target, t.message)
+            "SMS" -> sendSms(ctx, t.target, t.message, t.simSlot)
             "WHATSAPP" -> withContext(Dispatchers.Main) { sendWhatsApp(ctx, t.target, t.message, t.attachmentUri) }
             "CALL_SPEAK" -> withContext(Dispatchers.Main) { callAndSpeakOnDevice(ctx, t) }
             "OPEN_APP" -> withContext(Dispatchers.Main) {
