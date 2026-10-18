@@ -48,7 +48,13 @@ object CallSummarizer {
         }
 
         if (AssistantBridge.offlineMode || AppSettings.apiKey.isBlank() || !Net.isOnline(ctx)) {
-            return save(rec.copy(state = "PENDING", summary = "Waiting for internet to summarize…"))
+            return save(
+                rec.copy(
+                    state = "PENDING",
+                    summary = "Message recorded (${rec.durationSec}s) from ${rec.caller}. " +
+                        "The written summary appears when internet is back; you can still play the recording."
+                )
+            )
         }
 
         save(rec.copy(state = "SUMMARIZING", summary = "Summarizing…"))
