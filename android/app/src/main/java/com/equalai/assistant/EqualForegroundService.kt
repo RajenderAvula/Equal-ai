@@ -196,6 +196,69 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
         scope.launch { CommandRouter.handle(applicationContext, cmd) }
     }
 
+    // ---------------------------------------------------------------- notification queue
+    // One notification at a time: it is read out, then we wait for what you want to do. Others that arrive
+    // meanwhile wait in line and are announced as soon as the current one is dealt with (or times out).
+
+    private val notifQueue = java.util.ArrayDeque<AppNotificationItem>()
+    private var notifActive: AppNotificationItem? = null
+    private val notifTimeout = Runnable { resolveActiveNotification(force = true) }
+
+    private fun promptFor(item: AppNotificationItem): String {
+        val waiting = notifQueue.size
+        return "From ${item.appName}: ${item.message}" + (if (waiting > 0) " ($waiting more waiting)" else "") + " -> What next?"
+    }
+
+    fun announceNotification(item: AppNotificationItem) {
+        main.post {
+            notifQueue.addLast(item)
+            while (notifQueue.size > 20) notifQueue.removeFirst()
+            val active = notifActive
+            if (active == null) nextNotification()
+            else AssistantBridge.promptInTextBoxCallback?.invoke(promptFor(active))     // update the waiting count
+        }
+    }
+
+    private fun nextNotification() {
+        if (AssistantBridge.callInProgress) {                       // never talk over a phone call
+            main.postDelayed({ if (notifActive == null) nextNotification() }, 5_000L)
+            return
+        }
+        val item = notifQueue.pollFirst()
+        if (item == null) {
+            notifActive = null
+            return
+        }
+        notifActive = item
+        AssistantBridge.latestNotification = item
+        AssistantBridge.promptInTextBoxCallback?.invoke(promptFor(item))
+        speakBackground(
+            "Notification from ${item.appName}. ${item.sender} says: ${item.message}. What would you like to do next?",
+            listenAfter = true
+        )
+        main.removeCallbacks(notifTimeout)
+        main.postDelayed(notifTimeout, 45_000L)                     // safety net if nothing is ever said
+    }
+
+    /** You answered (spoken or typed): move on to the next waiting notification shortly. */
+    fun notificationHandled() {
+        main.post {
+            if (notifActive == null) return@post
+            main.removeCallbacks(notifTimeout)
+            main.postDelayed({ resolveActiveNotification(force = false) }, 2_500L)
+        }
+    }
+
+    private fun resolveActiveNotification(force: Boolean) {
+        if (!force && (AssistantBridge.pendingAction != null || isSpeaking)) {
+            main.postDelayed({ resolveActiveNotification(false) }, 3_000L)       // a confirmation is still open
+            return
+        }
+        main.removeCallbacks(notifTimeout)
+        notifActive = null
+        if (notifQueue.isNotEmpty()) nextNotification()
+    }
+
     // ---------------------------------------------------------------- speech out
 
     fun speakBackground(text: String, listenAfter: Boolean = false) {
@@ -245,6 +308,10 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
             if (AssistantBridge.callInProgress) return@post
             isSpeaking = false
             if (id == "LISTEN_AFTER") {
+                if (notifActive != null) {                              // give up on this one after a while
+                    main.removeCallbacks(notifTimeout)
+                    main.postDelayed(notifTimeout, 25_000L)
+                }
                 AssistantBridge.followUpUntil = System.currentTimeMillis() + 12_000L
                 startListeningInternal(true)
             } else {
