@@ -8,8 +8,12 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import androidx.core.content.ContextCompat
+import java.util.Locale
 
 /**
  * Dedicated microphone / speech-to-text engine.
@@ -146,6 +150,50 @@ class StreamingSpeechHelper(private val context: Context) {
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission not granted"
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
         else -> "Speech recognition error ($error)"
+    }
+
+    /**
+     * Is the offline speech pack for the phone's language installed? Answers on the main thread.
+     * Needs Android 13+ to be exact; older versions can only say whether an on-device recognizer exists.
+     */
+    fun checkOfflineSupport(onResult: (installed: Boolean, text: String) -> Unit) {
+        val lang = Locale.getDefault().toLanguageTag()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            val has = isOnDeviceAvailable() || isAvailable()
+            onResult(has, if (has) "Voice input is available. This Android version can't report the offline pack." else "No speech recognizer on this phone.")
+            return
+        }
+        try {
+            val r = if (isOnDeviceAvailable()) SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+            else SpeechRecognizer.createSpeechRecognizer(context)
+            val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            }
+            r.checkRecognitionSupport(i, ContextCompat.getMainExecutor(context), object : RecognitionSupportCallback {
+                override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                    val base = lang.substringBefore('-')
+                    val installed = recognitionSupport.installedOnDeviceLanguages.any { it.startsWith(base, ignoreCase = true) }
+                    val pending = recognitionSupport.pendingOnDeviceLanguages.any { it.startsWith(base, ignoreCase = true) }
+                    onResult(
+                        installed,
+                        when {
+                            installed -> "Installed for $lang. Offline voice is ready."
+                            pending -> "Downloading for $lang…"
+                            else -> "Not installed for $lang."
+                        }
+                    )
+                    try { r.destroy() } catch (e: Exception) { }
+                }
+
+                override fun onError(error: Int) {
+                    onResult(false, "Could not check the offline pack (error $error).")
+                    try { r.destroy() } catch (e: Exception) { }
+                }
+            })
+        } catch (e: Throwable) {
+            onResult(false, "Could not check the offline pack: ${e.localizedMessage}")
+        }
     }
 
     /**
