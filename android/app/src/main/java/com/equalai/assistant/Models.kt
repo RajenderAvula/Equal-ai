@@ -43,7 +43,12 @@ data class ScheduledActionItem(
     val target: String,
     val message: String,
     val triggerAt: Long,
-    val attachmentUri: String? = null
+    val attachmentUri: String? = null,   // WhatsApp: file uri. CALL_SPEAK: path of the pre-recorded voice clip
+    val converse: Boolean = true,        // CALL_SPEAK: assistant keeps talking with Gemini after the clip + text
+    val simSlot: Int = 0,                // 0 = SIM 1, 1 = SIM 2 (calls and texts)
+    val retries: Int = 0,                // CALL_SPEAK: extra attempts left when nobody answers
+    val retryGapMin: Int = 2,            // minutes between attempts
+    val fallbackText: String = ""        // sent by SMS when nobody answered after all attempts
 ) {
     val timeLabel: String
         get() = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(triggerAt))
@@ -55,6 +60,11 @@ data class ScheduledActionItem(
         .put("message", message)
         .put("at", triggerAt)
         .put("att", attachmentUri ?: JSONObject.NULL)
+        .put("conv", converse)
+        .put("sim", simSlot)
+        .put("retries", retries)
+        .put("gap", retryGapMin)
+        .put("fb", fallbackText)
 
     companion object {
         fun fromJson(o: JSONObject) = ScheduledActionItem(
@@ -63,7 +73,12 @@ data class ScheduledActionItem(
             target = o.getString("target"),
             message = o.optString("message", ""),
             triggerAt = o.getLong("at"),
-            attachmentUri = if (o.isNull("att")) null else o.getString("att")
+            attachmentUri = if (o.isNull("att")) null else o.getString("att"),
+            converse = o.optBoolean("conv", true),
+            simSlot = o.optInt("sim", 0),
+            retries = o.optInt("retries", 0),
+            retryGapMin = o.optInt("gap", 2),
+            fallbackText = o.optString("fb", "")
         )
     }
 }
@@ -211,6 +226,11 @@ object AppSettings {
     var speechRate: Float
         get() = prefs.getFloat("speech_rate_v2", 0.72f)
         set(v) { prefs.edit().putFloat("speech_rate_v2", v.coerceIn(0.4f, 1.2f)).apply() }
+
+    /** Default SIM for calls and texts: 0 = SIM 1, 1 = SIM 2. Used without asking. */
+    var defaultSim: Int
+        get() = prefs.getInt("default_sim", 0)
+        set(v) { prefs.edit().putInt("default_sim", v.coerceIn(0, 1)).apply() }
 
     /** Custom text the assistant tells or asks every caller, on top of its normal questions. */
     var callerNote: String
