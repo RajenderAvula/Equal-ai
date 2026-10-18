@@ -10,6 +10,7 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
@@ -74,18 +75,7 @@ class MainActivity : ComponentActivity() {
                 ) { startAssistantServiceIfPossible() }
 
                 LaunchedEffect(Unit) {
-                    val perms = mutableListOf(
-                        Manifest.permission.RECORD_AUDIO,
-                        Manifest.permission.CALL_PHONE,
-                        Manifest.permission.ANSWER_PHONE_CALLS,
-                        Manifest.permission.READ_PHONE_STATE,
-                        Manifest.permission.READ_CALL_LOG,
-                        Manifest.permission.SEND_SMS,
-                        Manifest.permission.READ_CONTACTS
-                    )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        perms.add(Manifest.permission.POST_NOTIFICATIONS)
-                    }
+                    val perms = requiredPermissions()
                     val missing = perms.filter {
                         ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
                     }
@@ -374,6 +364,33 @@ fun SchedulerTab(context: Context) {
     var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
     var simSlot by remember { mutableStateOf(AppSettings.defaultSim) }
+    val sched = rememberCoroutineScope()
+    var previewing by remember { mutableStateOf(false) }
+    var textPreview by remember { mutableStateOf("") }
+    val clipPlayer = remember { arrayOfNulls<MediaPlayer>(1) }
+
+    fun stopPreview() {
+        try { clipPlayer[0]?.stop() } catch (e: Exception) { }
+        try { clipPlayer[0]?.release() } catch (e: Exception) { }
+        clipPlayer[0] = null
+        previewing = false
+    }
+
+    fun startPreview(uri: String) {
+        stopPreview()
+        try {
+            val mp = MediaPlayer()
+            mp.setDataSource(context, Uri.parse(uri))
+            mp.setOnCompletionListener { stopPreview() }
+            mp.prepare()
+            mp.start()
+            clipPlayer[0] = mp
+            previewing = true
+        } catch (e: Exception) {
+            Toast.makeText(context, "Can't play that clip", Toast.LENGTH_SHORT).show()
+        }
+    }
+    DisposableEffect(Unit) { onDispose { stopPreview() } }
     var showAppPicker by remember { mutableStateOf(false) }
 
     if (showAppPicker) {
@@ -521,10 +538,24 @@ fun SchedulerTab(context: Context) {
                 }) { Icon(Icons.Default.Mic, contentDescription = "Record a voice clip") }
                 if (attachmentUriString != null) {
                     Text("Voice clip ready", color = Green, fontSize = 12.sp)
-                    TextButton(onClick = { attachmentUriString = null }) { Text("Remove") }
+                    TextButton(onClick = { if (previewing) stopPreview() else startPreview(attachmentUriString!!) }) {
+                        Icon(if (previewing) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (previewing) "Stop" else "Preview")
+                    }
+                    TextButton(onClick = { stopPreview(); attachmentUriString = null }) { Text("Remove") }
                 } else {
                     Text("Optional: record one or choose a file", fontSize = 12.sp, color = Color.Gray)
                 }
+            }
+            if (message.isNotBlank()) {
+                TextButton(onClick = {
+                    sched.launch {
+                        textPreview = "Speaking…"
+                        textPreview = CallVoice.speakIntoCall(message, null) ?: "Played"
+                    }
+                }) { Text("Preview the custom text (voice and speed)") }
+                if (textPreview.isNotBlank()) Text(textPreview, fontSize = 11.sp, color = Color.Gray)
             }
             LabeledSwitch("Assistant talks with them afterwards", converse) { converse = it }
 
@@ -784,6 +815,14 @@ fun CallsTab(context: Context) {
     var callerNote by remember { mutableStateOf(AppSettings.callerNote) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = RecordingImport.import(context, uri)
+                if (!ok) Toast.makeText(context, "Could not read that audio file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     DisposableEffect(Unit) { onDispose { try { player?.release() } catch (e: Exception) { } } }
 
@@ -830,6 +869,8 @@ fun CallsTab(context: Context) {
             }
         }
 
+        Text("Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray)
+
         OutlinedTextField(
             value = callerNote,
             onValueChange = { callerNote = it; AppSettings.callerNote = it },
@@ -838,6 +879,11 @@ fun CallsTab(context: Context) {
             supportingText = { Text("Said or asked in the greeting, on top of Gemini's own questions.") },
             modifier = Modifier.fillMaxWidth()
         )
+
+        OutlinedButton(
+            onClick = { importPicker.launch(arrayOf("audio/*")) },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Summarize a recording (pick an audio file)") }
 
         Text("Call history", fontWeight = FontWeight.Bold)
         LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -906,14 +952,24 @@ fun CallsTab(context: Context) {
 
 @Composable
 fun SetupTab(context: Context) {
+    val scope = rememberCoroutineScope()
     var apiKey by remember { mutableStateOf(AppSettings.apiKey) }
     var modelName by remember { mutableStateOf(AppSettings.modelName) }
     var ownerName by remember { mutableStateOf(AppSettings.ownerName) }
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
+    var speakerOn by remember { mutableStateOf(AppSettings.speakerOn) }
+    var logCalls by remember { mutableStateOf(AppSettings.logOtherCalls) }
     var defSim by remember { mutableStateOf(AppSettings.defaultSim) }
     var waitSec by remember { mutableStateOf(AppSettings.outgoingWaitSec.toFloat()) }
+    var voiceStatus by remember { mutableStateOf("") }
+    var offlineOk by remember { mutableStateOf(false) }
+    var offlineText by remember { mutableStateOf("Checking…") }
+    var downloading by remember { mutableStateOf(false) }
+    var tick by remember { mutableStateOf(0) }
+
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
 
     fun open(intent: Intent) {
         try { context.startActivity(intent) } catch (e: Exception) {
@@ -921,31 +977,142 @@ fun SetupTab(context: Context) {
         }
     }
 
+    fun refreshOffline() {
+        StreamingSpeechHelper(context).checkOfflineSupport { ok, text ->
+            offlineOk = ok
+            offlineText = text
+            if (ok) downloading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshOffline()
+        while (true) {
+            delay(1_500)
+            tick++
+        }
+    }
+    LaunchedEffect(downloading) {
+        var n = 0
+        while (downloading && n < 60) {            // check every 3 s for up to 3 minutes
+            delay(3_000)
+            refreshOffline()
+            n++
+        }
+        if (downloading) downloading = false
+    }
+
+    @Suppress("UNUSED_VARIABLE") val liveTick = tick     // re-reads the live states below on every refresh
+    val missingPerms = requiredPermissions().filter {
+        ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    }
+    val missingNames = missingPerms.map { permissionLabel(it) }.distinct().joinToString(", ")
+    val batteryOk = try {
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
+    } catch (e: Exception) { false }
+
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("1. System permissions", fontWeight = FontWeight.Bold)
-        Text(
-            "Sideloaded on Android 13+? Open App info, tap the ⋮ menu, choose \"Allow restricted settings\", " +
-                "or the Accessibility and Notification toggles stay greyed out.",
-            fontSize = 12.sp, color = Color.Gray
-        )
+        Text("1. Status and permissions", fontWeight = FontWeight.Bold)
+        Text("Live status. Tap Enable on anything that is OFF.", fontSize = 12.sp, color = Color.Gray)
 
-        SetupButton("App info (allow restricted settings)") {
-            open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+        StatusRow(
+            "Permissions", missingPerms.isEmpty(),
+            if (missingPerms.isEmpty()) "Phone, microphone, call log, SMS, contacts, audio files all allowed"
+            else "Missing: $missingNames",
+            "Allow"
+        ) { permLauncher.launch(missingPerms.toTypedArray()) }
+
+        StatusRow(
+            "Voice service", AssistantBridge.foregroundService != null,
+            "Keeps listening in the background and lets the microphone work during calls", "Start"
+        ) {
+            try {
+                ContextCompat.startForegroundService(context, Intent(context, EqualForegroundService::class.java))
+            } catch (e: Exception) {
+                Toast.makeText(context, "Android would not start it from here. Close and reopen Equal AI.", Toast.LENGTH_LONG).show()
+            }
         }
-        SetupButton("Enable accessibility (reads screens, opens apps)") { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        SetupButton("Enable notification listener") { open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-        SetupButton("Enable display over other apps") {
-            open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
-        }
-        SetupButton("Allow exact alarms (scheduler)") {
+
+        StatusRow(
+            "Accessibility service", AssistantBridge.accessibilityService != null,
+            "Reads screens, opens apps, spots when a scheduled call is answered, presses Speaker", "Enable"
+        ) { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+
+        StatusRow(
+            "Notification access", AssistantBridge.notificationService != null,
+            "Lets Equal read and answer your notifications", "Enable"
+        ) { open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+
+        StatusRow(
+            "Display over other apps", Settings.canDrawOverlays(context),
+            "Helps Equal open apps from the background", "Enable"
+        ) { open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))) }
+
+        StatusRow(
+            "Exact alarms", Scheduler.canExact(context),
+            "Scheduled calls and texts run on time", "Enable"
+        ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 open(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${context.packageName}")))
             }
         }
-        SetupButton("Battery: set Equal AI to unrestricted") { open(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+
+        StatusRow(
+            "Battery unrestricted", batteryOk,
+            "Stops Android from killing Equal, so it can answer calls", "Enable"
+        ) { open(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+
+        StatusRow(
+            "Voice engine (text to speech)", CallVoice.isReady,
+            if (CallVoice.isReady) "Ready" else "Not ready. Install a voice in phone Settings, Text-to-speech.", "Open"
+        ) {
+            CallVoice.init(context)
+            open(Intent("com.android.settings.TTS_SETTINGS"))
+        }
+
+        StatusRow(
+            "Offline speech pack", offlineOk,
+            if (downloading) "$offlineText (checking every 3 seconds…)" else offlineText,
+            if (downloading) null else "Download"
+        ) {
+            Toast.makeText(context, StreamingSpeechHelper(context).downloadOfflineModel(), Toast.LENGTH_LONG).show()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                downloading = true
+                offlineText = "Download requested…"
+            }
+        }
+        if (!offlineOk && !downloading) {
+            TextButton(onClick = { refreshOffline() }) { Text("Check again") }
+        }
+
+        StatusRow("Gemini API key", apiKey.isNotBlank(), "Needed for replies and summaries (not for offline use)", null) { }
+
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF3C7))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Accessibility or Notification toggle greyed out?", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(
+                    "Android blocks sideloaded apps until you allow it. The \"Allow restricted settings\" option " +
+                        "only appears AFTER you have tried to switch the toggle on once:\n" +
+                        "1. Tap \"Open Accessibility settings\", tap Equal AI, and see the blocked message.\n" +
+                        "2. Tap \"Open App info\", then the ⋮ menu (top right), then Allow restricted settings. " +
+                        "Confirm with your PIN or fingerprint.\n" +
+                        "3. Go back to Accessibility and switch Equal AI on. Repeat for Notification access.\n\n" +
+                        "Menu still missing? Install the APK from a computer instead: adb install -r equal-ai.apk. " +
+                        "Or, with the phone connected: adb shell cmd appops set com.equalai.assistant " +
+                        "ACCESS_RESTRICTED_SETTINGS allow",
+                    fontSize = 12.sp
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("Open Accessibility settings") }
+                }
+                OutlinedButton(onClick = {
+                    open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+                }) { Text("Open App info") }
+            }
+        }
 
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
         Text("2. Google AI (Gemini)", fontWeight = FontWeight.Bold)
@@ -966,11 +1133,10 @@ fun SetupTab(context: Context) {
         )
 
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        Text("3. Call answering", fontWeight = FontWeight.Bold)
+        Text("3. Calls", fontWeight = FontWeight.Bold)
         Text(
-            "Turn it on in the Calls tab. Open Equal AI once after every reboot so the voice service is running; " +
-                "calls are only answered while it runs. Many phones silence the microphone for apps during calls. " +
-                "If a call card shows a warning, this phone can't do it.",
+            "Switch on auto-answer in the Calls tab. Many phones silence the microphone for apps during calls; " +
+                "if a call card shows a warning, this phone can't capture the caller.",
             fontSize = 12.sp, color = Color.Gray
         )
         OutlinedTextField(
@@ -993,18 +1159,32 @@ fun SetupTab(context: Context) {
             onValueChangeFinished = { AppSettings.ringDelaySec = delaySec.toInt() },
             valueRange = 5f..40f
         )
+        LabeledSwitch("List and summarize all my other calls", logCalls) {
+            logCalls = it
+            AppSettings.logOtherCalls = it
+        }
         Text(
-            "Scheduled calls: with the accessibility service on, Equal sees when the other person answers and " +
-                "retries if nobody does. Without it, it assumes an answer after the seconds below.",
+            "Calls you answer, dial or miss yourself are added to Call history. If your phone's call recorder saves " +
+                "audio files, Equal finds the recording and Gemini summarizes it. Needs the Call log and Audio files " +
+                "permissions, and call recording switched on in your phone app.",
             fontSize = 12.sp, color = Color.Gray
         )
-        Text("Scheduled call: assume answered ${waitSec.toInt()}s after dialing if the call timer can't be read", fontSize = 13.sp)
+        Text(
+            "Scheduled calls: with the accessibility service on, Equal sees when the other person answers. " +
+                "Without it, it speaks after the seconds below and uses the call log afterwards to tell whether " +
+                "anyone really picked up (for the redial).",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        Text("Scheduled call: start speaking ${waitSec.toInt()}s after dialing if the timer can't be read", fontSize = 13.sp)
         Slider(
             value = waitSec,
             onValueChange = { waitSec = it },
             onValueChangeFinished = { AppSettings.outgoingWaitSec = waitSec.toInt() },
             valueRange = 5f..45f
         )
+
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        Text("4. Assistant voice", fontWeight = FontWeight.Bold)
         Text("Voice speed: ${"%.2f".format(speed)}x (lower is slower)", fontSize = 13.sp)
         Slider(
             value = speed,
@@ -1013,33 +1193,83 @@ fun SetupTab(context: Context) {
             valueRange = 0.4f..1.2f
         )
         SetupButton("Test the voice") {
-            AssistantBridge.foregroundService?.speakBackground(
-                "Hello, this is Equal. This is how fast I will speak on your calls."
-            ) ?: Toast.makeText(context, "Turn the assistant on first", Toast.LENGTH_SHORT).show()
+            scope.launch {
+                voiceStatus = "Speaking…"
+                val err = CallVoice.speakIntoCall("Hello, this is Equal. This is how I will sound on your calls.", null)
+                voiceStatus = err ?: "Played. If you heard nothing, raise the alarm volume and check the voice engine above."
+            }
         }
+        if (voiceStatus.isNotBlank()) Text(voiceStatus, fontSize = 12.sp, color = Green)
         LabeledSwitch("Loud voice for callers (alarm channel)", loud) {
             loud = it
             AppSettings.loudVoice = it
         }
         Text(
-            "On: the assistant speaks on the alarm channel at full volume, which is the most reliable way for " +
-                "the caller to hear it. Turn off to use the normal call channel.",
+            "On: the assistant speaks on the alarm channel at full volume, the most reliable way for the caller to " +
+                "hear it. Turn off to use the normal call channel.",
             fontSize = 12.sp, color = Color.Gray
         )
-
-        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        Text("4. Offline voice (microphone)", fontWeight = FontWeight.Bold)
+        LabeledSwitch("Loudspeaker during calls", speakerOn) {
+            speakerOn = it
+            AppSettings.speakerOn = it
+        }
         Text(
-            "Offline mode uses the phone's on-device speech recognizer and the language of your phone's voice " +
-                "input. If it says the offline speech pack is missing, download it here.",
+            "On (default): the call is put on speaker. If the caller or receiver still can't hear the assistant, try " +
+                "switching this off: on some phones the speaker cancels the assistant's own voice out of the call.",
             fontSize = 12.sp, color = Color.Gray
         )
-        SetupButton("Download offline speech") {
-            val msg = AssistantBridge.foregroundService?.downloadOfflineSpeech()
-                ?: StreamingSpeechHelper(context).downloadOfflineModel()
-            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+    }
+}
+
+@Composable
+private fun StatusRow(label: String, ok: Boolean, detail: String, action: String?, onClick: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(label, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(
+                        if (ok) "ON" else "OFF",
+                        fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                        color = if (ok) Green else Color(0xFFB91C1C)
+                    )
+                }
+                if (detail.isNotBlank()) Text(detail, fontSize = 11.sp, color = Color.Gray)
+            }
+            if (!ok && action != null) {
+                Button(onClick = onClick, colors = ButtonDefaults.buttonColors(containerColor = Ink)) { Text(action) }
+            }
         }
     }
+}
+
+fun requiredPermissions(): List<String> {
+    val perms = mutableListOf(
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.CALL_PHONE,
+        Manifest.permission.ANSWER_PHONE_CALLS,
+        Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_CALL_LOG,
+        Manifest.permission.SEND_SMS,
+        Manifest.permission.READ_CONTACTS
+    )
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        perms.add("android.permission.READ_MEDIA_AUDIO")
+    } else {
+        perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    return perms
+}
+
+private fun permissionLabel(p: String) = when (p) {
+    Manifest.permission.RECORD_AUDIO -> "Microphone"
+    Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_PHONE_STATE -> "Phone"
+    Manifest.permission.READ_CALL_LOG -> "Call log"
+    Manifest.permission.SEND_SMS -> "SMS"
+    Manifest.permission.READ_CONTACTS -> "Contacts"
+    Manifest.permission.POST_NOTIFICATIONS -> "Notifications"
+    else -> "Audio files"
 }
 
 @Composable
