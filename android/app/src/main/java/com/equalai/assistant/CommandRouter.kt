@@ -41,6 +41,8 @@ object CommandRouter {
         val clean = spoken.trim().lowercase(Locale.getDefault()).trimEnd('.', '!', '?', ',')
         if (clean.isEmpty()) return
 
+        AssistantBridge.foregroundService?.notificationHandled()      // lets the next waiting notification through
+
         // ---- 1. Answer to a pending confirmation ------------------------------------------
         val pending = AssistantBridge.pendingAction
         if (pending != null) {
@@ -57,6 +59,7 @@ object CommandRouter {
         }
 
         // ---- 2. Notification follow-ups ---------------------------------------------------
+        if (clean in setOf("skip", "next", "ignore", "later", "leave it", "ignore it", "skip it")) return
         if (clean in setOf("open", "open it", "open this", "open that", "open the app", "open app",
                 "open notification", "open the notification", "open message", "open the message")) {
             val n = AssistantBridge.latestNotification ?: AssistantBridge.notifications.firstOrNull()
