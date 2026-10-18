@@ -441,6 +441,11 @@ class CallAudioRoute(ctx: Context) {
                 0
             )
         } catch (e: Exception) { }
+        applySpeaker()
+    }
+
+    private fun applySpeaker() {
+        if (!AppSettings.speakerOn) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val speaker = am.availableCommunicationDevices
@@ -451,6 +456,27 @@ class CallAudioRoute(ctx: Context) {
             }
         } catch (e: Exception) {
             AssistantBridge.log("Could not switch to speaker: ${e.localizedMessage}")
+        }
+    }
+
+    private fun speakerIsOn(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        else am.isSpeakerphoneOn
+    } catch (e: Exception) { true }
+
+    /**
+     * Call again right after the other side answers: many phones put the call back on the earpiece at
+     * that moment. If the speaker still isn't on, press "Speaker" in the phone app (accessibility service).
+     */
+    fun ensureSpeaker() {
+        if (!AppSettings.speakerOn) return
+        applySpeaker()
+        if (!speakerIsOn()) {
+            val clicked = AssistantBridge.accessibilityService?.clickByText("Speaker") == true
+            AssistantBridge.log(
+                if (clicked) "Speaker was off: pressed Speaker in the phone app."
+                else "Speaker is still off. The caller may not hear the assistant."
+            )
         }
     }
 
