@@ -111,12 +111,14 @@ object CallAnswerer {
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
                 if (callMark == 0L) callMark = System.currentTimeMillis()
                 cancelPendingAnswer()
+                PhoneRecorder.onCallActive()
                 if (weAnswered && session == null) startSession(ctx)
                 else if (!weAnswered) OutgoingCall.onOffHook(ctx.applicationContext)
             }
 
             TelephonyManager.EXTRA_STATE_IDLE -> {
                 OutgoingCall.onIdle()
+                PhoneRecorder.cancel()
                 ringing = false
                 cancelPendingAnswer()
                 val handledByEqual = weAnswered || session != null
