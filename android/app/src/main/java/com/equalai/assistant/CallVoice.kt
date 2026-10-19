@@ -187,7 +187,32 @@ object CallVoice {
         return pcm to rate
     }
 
-    private suspend fun playPcm(pcm: ByteArray, rate: Int) = withContext(Dispatchers.IO) {
+    /** Raises the voice to near full volume (TTS is usually quiet): the microphone hears the speaker, so louder = clearer for the receiver. */
+    private fun boost(src: ByteArray): ByteArray {
+        var peak = 1
+        var i = 0
+        while (i + 1 < src.size) {
+            val v = ((src[i + 1].toInt() shl 8) or (src[i].toInt() and 0xff)).toShort().toInt()
+            val a = if (v < 0) -v else v
+            if (a > peak) peak = a
+            i += 2
+        }
+        val gain = (31000f / peak).coerceIn(1f, 8f)
+        if (gain <= 1.05f) return src
+        val out = ByteArray(src.size)
+        i = 0
+        while (i + 1 < src.size) {
+            val v = ((src[i + 1].toInt() shl 8) or (src[i].toInt() and 0xff)).toShort().toInt()
+            val b = (v * gain).toInt().coerceIn(-32768, 32767)
+            out[i] = (b and 0xff).toByte()
+            out[i + 1] = ((b shr 8) and 0xff).toByte()
+            i += 2
+        }
+        return out
+    }
+
+    private suspend fun playPcm(pcmIn: ByteArray, rate: Int) = withContext(Dispatchers.IO) {
+        val pcm = boost(pcmIn)
         val usage = if (AppSettings.loudVoice) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_VOICE_COMMUNICATION
         var track: AudioTrack? = null
         try {
@@ -249,4 +274,3 @@ object CallVoice {
         error
     }
 }
-
