@@ -85,7 +85,9 @@ object CallAnswerer {
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
                 if (!number.isNullOrBlank()) ringNumber = number
-                if (ringing) return
+                // a call that never reported "idle" (phone state missed) must not block the next one
+                if (ringing && System.currentTimeMillis() - callMark < 90_000L) return
+                cancelPendingAnswer()
                 ringing = true
                 callMark = System.currentTimeMillis()
                 if (!AppSettings.autoAnswer) {
@@ -102,10 +104,16 @@ object CallAnswerer {
                         ContextCompat.startForegroundService(ctx, Intent(ctx, EqualForegroundService::class.java))
                     } catch (e: Exception) { }
                 }
-                val r = Runnable { answer(ctx) }
-                answerRunnable = r
-                main.postDelayed(r, AppSettings.ringDelaySec * 1000L)
-                AssistantBridge.callNote("Incoming call: Equal answers in ${AppSettings.ringDelaySec}s unless you pick up.")
+                if (AppSettings.ringDelaySec <= 0) {
+                    // answer inside this broadcast: no timer, so it also works when the app is asleep
+                    AssistantBridge.callNote("Incoming call: answering now.")
+                    answer(ctx)
+                } else {
+                    val r = Runnable { answer(ctx) }
+                    answerRunnable = r
+                    main.postDelayed(r, AppSettings.ringDelaySec * 1000L)
+                    AssistantBridge.callNote("Incoming call: Equal answers in ${AppSettings.ringDelaySec}s unless you pick up.")
+                }
             }
 
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
@@ -152,6 +160,7 @@ object CallAnswerer {
         try {
             weAnswered = true
             (ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager).acceptRingingCall()
+            AssistantBridge.callNote("Equal answered the call.")
         } catch (e: Exception) {
             weAnswered = false
             AssistantBridge.callNote("Could not answer the call: ${e.localizedMessage}")
@@ -332,6 +341,13 @@ object CallAnswerer {
         route.ensureSpeaker()
         delay(500)
 
+        // 0. custom greeting
+        val hello = task.greeting.trim()
+        if (hello.isNotBlank()) {
+            s.lines.add("Assistant: $hello")
+            sayInto(rec, hello)
+            delay(300)
+        }
         // 1. pre-recorded voice clip
         val clip = task.attachmentUri?.let { File(it) }?.takeIf { it.exists() }
         if (clip != null) {
@@ -353,7 +369,8 @@ object CallAnswerer {
         if (canTalk) {
             val context = buildString {
                 append("You called this person on behalf of $owner. ")
-                if (clip != null) append("First they heard a pre-recorded voice message. ")
+                if (hello.isNotBlank()) append("You greeted them: \"$hello\". ")
+                if (clip != null) append("Then they heard a pre-recorded voice message. ")
                 if (text.isNotBlank()) append("Then you told them: \"$text\". ")
             }
             var silent = 0
@@ -450,7 +467,11 @@ object CallAnswerer {
         delay(700)                                        // let the audio route settle
         route.ensureSpeaker()
         val note = AppSettings.callerNote
-        val greeting = if (s.degraded) {
+        val custom = AppSettings.greeting
+        val greeting = if (custom.isNotBlank()) {
+            custom + " " + (if (note.isNotBlank()) "$note " else "") +
+                (if (s.degraded) "Please leave your name, number and message after the beep." else "May I have your name and the reason for calling?")
+        } else if (s.degraded) {
             "Hello, this is Equal, the AI assistant for $owner. This call is being recorded. " +
                 "$owner can't take your call right now. " + (if (note.isNotBlank()) "$note " else "") +
                 "Please leave your name, number and message after the beep."
