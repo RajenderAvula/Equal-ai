@@ -15,6 +15,8 @@ import android.provider.Settings
  */
 object PhoneRecorder {
     private val handler = Handler(Looper.getMainLooper())
+    private val followUp = Handler(Looper.getMainLooper())     // second step of the menu path; kept apart so it isn't cancelled
+    private val menuLabels = listOf("More options", "More", "Options", "More actions")
 
     private val startLabels = listOf("Start recording", "Record call", "Record")
     private val stopLabels = listOf("Stop recording", "Stop call recording", "Stop recorder", "Stop record", "Recording")
@@ -28,7 +30,10 @@ object PhoneRecorder {
         }
     }
 
-    fun cancel() = handler.removeCallbacksAndMessages(null)
+    fun cancel() {
+        handler.removeCallbacksAndMessages(null)
+        followUp.removeCallbacksAndMessages(null)
+    }
 
     /** Returns true when nothing more needs doing (already in the wanted state, or button pressed). */
     private fun apply(mode: Int): Boolean {
@@ -41,8 +46,22 @@ object PhoneRecorder {
         return when {
             mode == 1 && recording -> { AssistantBridge.callNote("Phone recorder: already recording."); true }
             mode == 1 -> {
-                val ok = startLabels.any { svc.clickByText(it) }
-                if (ok) AssistantBridge.callNote("Phone recorder: pressed Record.")
+                var ok = startLabels.any { svc.clickByText(it) }
+                if (ok) {
+                    AssistantBridge.callNote("Phone recorder: pressed Record.")
+                } else if (menuLabels.any { svc.clickByText(it) }) {
+                    // Samsung: Record sits in the three-dot menu at the top right of the call screen
+                    ok = true
+                    AssistantBridge.callNote("Phone recorder: opened the menu, choosing Record.")
+                    followUp.postDelayed({
+                        val s2 = AssistantBridge.accessibilityService
+                        val pressed = s2 != null && startLabels.any { s2.clickByText(it) }
+                        AssistantBridge.callNote(
+                            if (pressed) "Phone recorder: pressed Record in the menu."
+                            else "Phone recorder: Record wasn't found in the menu. Start it by hand once and tell me what it says."
+                        )
+                    }, 800)
+                }
                 ok
             }
             mode == 2 && recording -> {
