@@ -242,10 +242,14 @@ object AppSettings {
         get() = prefs.getFloat("speech_rate_v2", 0.72f)
         set(v) { prefs.edit().putFloat("speech_rate_v2", v.coerceIn(0.4f, 1.2f)).apply() }
 
-    /** true = loudspeaker during calls (default). Turn off to use the earpiece plus the loud alarm channel. */
+    /**
+     * false (default) = the call stays on the earpiece and the assistant speaks on the loud alarm channel.
+     * true = the call itself is put on speakerphone. On many phones the call's echo canceller then removes the
+     * assistant's voice from what the other person hears, so this is off by default.
+     */
     var speakerOn: Boolean
-        get() = prefs.getBoolean("speaker_on", true)
-        set(v) { prefs.edit().putBoolean("speaker_on", v).apply() }
+        get() = prefs.getBoolean("speaker_on_v2", false)
+        set(v) { prefs.edit().putBoolean("speaker_on_v2", v).apply() }
 
     /** How loud the assistant's voice is on calls: 0.3 to 1.0 (the speaker next to the mic can distort at full volume). */
     var callVoiceLevel: Float
@@ -256,6 +260,14 @@ object AppSettings {
     var phoneRecorder: Int
         get() = prefs.getInt("phone_recorder", 1)
         set(v) { prefs.edit().putInt("phone_recorder", v.coerceIn(0, 2)).apply() }
+
+    /** A loop cable is plugged into the headphone jack (output wired into the headset mic): the assistant's voice goes in through it. */
+    var headsetLoop: Boolean
+        get() = prefs.getBoolean("headset_loop", false)
+        set(v) { prefs.edit().putBoolean("headset_loop", v).apply() }
+
+    /** Put the call itself on speakerphone? Never while the loop cable is used. */
+    val useSpeaker: Boolean get() = speakerOn && !headsetLoop
 
     /** List every call (not just Equal's) in Call history and summarize it when a recording can be found. */
     var logOtherCalls: Boolean
