@@ -490,7 +490,8 @@ class CallAudioRoute(ctx: Context) {
         }
         AssistantBridge.log(
             "Could not confirm the speaker is on. The assistant's voice still plays on the loud alarm channel, which " +
-                "uses the loudspeaker anyway. If the caller hears nothing, press Speaker yourself once, or turn on Accessibility."
+                "uses the loudspeaker anyway. Call screen shows: " +
+                (AssistantBridge.accessibilityService?.screenSummary(300) ?: "(accessibility off)")
         )
     }
 
