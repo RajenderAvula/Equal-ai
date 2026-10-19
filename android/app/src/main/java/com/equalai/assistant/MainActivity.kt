@@ -117,11 +117,19 @@ fun EqualAssistantMainScreen() {
     var selectedTab by remember { mutableStateOf(0) }
     var universalInput by remember { mutableStateOf("") }
 
+    fun runTyped() {
+        if (universalInput.isBlank()) return
+        // the box may still hold "From WhatsApp: ... -> What next?": keep only what was typed after it
+        val cmd = universalInput.removePrefix("🎤 Listening...").removePrefix("Hearing: ")
+            .substringAfterLast("What next?").trim().trimEnd('.')
+        universalInput = ""
+        AssistantBridge.followUpUntil = 0L
+        scope.launch { CommandRouter.handle(context, cmd) }
+    }
+
     DisposableEffect(Unit) {
         AssistantBridge.promptInTextBoxCallback = { text ->
-            if (text.isNotBlank() || universalInput.startsWith("🎤") || universalInput.startsWith("Hearing")) {
-                universalInput = text
-            }
+            universalInput = text      // blank text = a command was accepted: empty the box
         }
         onDispose { AssistantBridge.promptInTextBoxCallback = null }
     }
@@ -177,7 +185,10 @@ fun EqualAssistantMainScreen() {
                     onValueChange = { universalInput = it },
                     placeholder = { Text("Say \"Hey Equal…\" or type") },
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { runTyped() })
                 )
                 IconButton(
                     onClick = {
@@ -191,16 +202,7 @@ fun EqualAssistantMainScreen() {
                     modifier = Modifier.clip(CircleShape).background(Green)
                 ) { Icon(Icons.Default.Mic, contentDescription = "Talk now", tint = Color.White) }
                 IconButton(
-                    onClick = {
-                        if (universalInput.isNotBlank()) {
-                            // the box may still hold "From WhatsApp: ... -> What next?": keep only what was typed after it
-                            val cmd = universalInput.removePrefix("🎤 Listening...").removePrefix("Hearing: ")
-                                .substringAfterLast("What next?").trim().trimEnd('.')
-                            universalInput = ""
-                            AssistantBridge.followUpUntil = 0L
-                            scope.launch { CommandRouter.handle(context, cmd) }
-                        }
-                    },
+                    onClick = { runTyped() },
                     modifier = Modifier.clip(CircleShape).background(Ink)
                 ) { Icon(Icons.Default.Send, contentDescription = "Run", tint = Color.White) }
             }
@@ -263,6 +265,70 @@ fun LabeledSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) 
     }
 }
 
+/** One live notification on a full-screen page: full text, open the app, reply, dismiss. */
+@Composable
+fun NotificationFullScreen(item: AppNotificationItem, onClose: () -> Unit) {
+    val context = LocalContext.current
+    var reply by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf("") }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF8FAFC)) {
+            Column(modifier = Modifier.fillMaxSize().padding(20.dp).statusBarsPadding().navigationBarsPadding()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onClose) { Icon(Icons.Default.Close, contentDescription = "Close") }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(item.appName, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                        Text(item.timestamp, color = Color.Gray, fontSize = 12.sp)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(item.sender, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                Spacer(Modifier.height(8.dp))
+                Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    Text(item.message, fontSize = 17.sp)
+                }
+                if (status.isNotBlank()) Text(status, fontSize = 12.sp, color = Green)
+                if (item.replyAction != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedTextField(
+                            value = reply, onValueChange = { reply = it },
+                            placeholder = { Text("Reply…") }, modifier = Modifier.weight(1f), singleLine = true
+                        )
+                        Button(onClick = {
+                            if (reply.isNotBlank()) {
+                                val ok = AssistantBridge.notificationService?.replyTo(item, reply.trim()) == true
+                                status = if (ok) "Reply sent." else "That notification can't be replied to."
+                                if (ok) reply = ""
+                            }
+                        }) { Text("Send") }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = {
+                            if (ActionExecutor.openNotification(context, item)) onClose()
+                            else status = "Could not open ${item.appName}"
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Open app") }
+                    OutlinedButton(
+                        onClick = {
+                            val svc = AssistantBridge.notificationService
+                            if (svc != null) svc.dismissItem(item) else AssistantBridge.notifications.remove(item)
+                            onClose()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Dismiss") }
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // ALERTS TAB
 // ============================================================================
@@ -270,6 +336,10 @@ fun LabeledSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) 
 @Composable
 fun NotificationsTab() {
     val context = LocalContext.current
+    var detail by remember { mutableStateOf<AppNotificationItem?>(null) }
+    detail?.let { item ->
+        NotificationFullScreen(item) { detail = null }
+    }
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Row(
@@ -295,19 +365,18 @@ fun NotificationsTab() {
         ) {
             Text("Live notifications (${AssistantBridge.notifications.size})", fontWeight = FontWeight.Bold)
             TextButton(
-                onClick = { AssistantBridge.notifications.clear(); AssistantBridge.latestNotification = null },
+                onClick = {
+                    AssistantBridge.notifications.clear(); AssistantBridge.latestNotification = null
+                    AssistantBridge.foregroundService?.clearNotificationQueue()
+                },
                 enabled = AssistantBridge.notifications.isNotEmpty()
             ) { Text("Clear all") }
         }
-        Text("Tap a notification to open it. The X removes it here and from your phone's notification bar.", fontSize = 11.sp, color = Color.Gray)
+        Text("Tap a notification to open it full screen. The X removes it here and from your phone's notification bar.", fontSize = 11.sp, color = Color.Gray)
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(AssistantBridge.notifications.toList()) { item ->
                 Card(
-                    modifier = Modifier.fillMaxWidth().clickable {
-                        if (!ActionExecutor.openNotification(context, item)) {
-                            Toast.makeText(context, "Could not open ${item.appName}", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    modifier = Modifier.fillMaxWidth().clickable { detail = item },
                     colors = CardDefaults.cardColors(containerColor = Color.White)
                 ) {
                     Row(modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.Top) {
@@ -363,6 +432,7 @@ fun SchedulerTab(context: Context) {
     var retries by remember { mutableStateOf(0f) }
     var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
+    var greet by remember { mutableStateOf("") }
     var simSlot by remember { mutableStateOf(AppSettings.defaultSim) }
     val sched = rememberCoroutineScope()
     var previewing by remember { mutableStateOf(false) }
@@ -524,7 +594,14 @@ fun SchedulerTab(context: Context) {
         }
 
         if (actionType == "CALL_SPEAK") {
-            Text("Pre-recorded voice (played first, once they answer)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            OutlinedTextField(
+                value = greet,
+                onValueChange = { greet = it },
+                label = { Text("Greeting, said first when they answer (optional)") },
+                placeholder = { Text("e.g. Hello Priya, this is Equal calling for Ravi") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text("Pre-recorded voice (played after the greeting, once they answer)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 IconButton(onClick = { audioPicker.launch(arrayOf("audio/*")) }) {
                     Icon(Icons.Default.AttachFile, contentDescription = "Choose an audio file")
@@ -692,10 +769,11 @@ fun SchedulerTab(context: Context) {
                                     simSlot = simSlot,
                                     retries = if (isCall) retries.toInt() else 0,
                                     retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
-                                    fallbackText = if (isCall) fallback.trim() else ""
+                                    fallbackText = if (isCall) fallback.trim() else "",
+                                    greeting = if (isCall) greet.trim() else ""
                                 )
                             )
-                            target = ""; message = ""; attachmentUriString = null; appLabel = ""; fallback = ""
+                            target = ""; message = ""; attachmentUriString = null; appLabel = ""; fallback = ""; greet = ""
                             Toast.makeText(context, "Scheduled", Toast.LENGTH_SHORT).show()
                         }
                     }
@@ -728,6 +806,7 @@ fun SchedulerTab(context: Context) {
                                 if (task.converse) add("assistant talks")
                                 if (task.retries > 0) add("${task.retries} retries")
                                 if (task.fallbackText.isNotBlank()) add("fallback text")
+                                if (task.greeting.isNotBlank()) add("greeting")
                             }.joinToString(" · ")
                             if (extras.isNotBlank()) Text(extras, fontSize = 11.sp, color = Color.Gray)
                         }
@@ -813,6 +892,7 @@ fun CallsTab(context: Context) {
     val scope = rememberCoroutineScope()
     var autoAnswer by remember { mutableStateOf(AppSettings.autoAnswer) }
     var callerNote by remember { mutableStateOf(AppSettings.callerNote) }
+    var greetingText by remember { mutableStateOf(AppSettings.greeting) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -871,6 +951,14 @@ fun CallsTab(context: Context) {
 
         Text("Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray)
 
+        OutlinedTextField(
+            value = greetingText,
+            onValueChange = { greetingText = it; AppSettings.greeting = it },
+            label = { Text("Custom greeting for callers (optional)") },
+            placeholder = { Text("e.g. Hello, you have reached Ravi's assistant") },
+            supportingText = { Text("Replaces the standard \"Hello, this is Equal...\" opening. Leave blank for the standard one.") },
+            modifier = Modifier.fillMaxWidth()
+        )
         OutlinedTextField(
             value = callerNote,
             onValueChange = { callerNote = it; AppSettings.callerNote = it },
@@ -1154,12 +1242,12 @@ fun SetupTab(context: Context) {
                 FilterChip(selected = defSim == k, onClick = { defSim = k; AppSettings.defaultSim = k }, label = { Text(v) })
             }
         }
-        Text("Answer after ${delaySec.toInt()} seconds of ringing", fontSize = 13.sp)
+        Text(if (delaySec.toInt() == 0) "Answer immediately (0 seconds)" else "Answer after ${delaySec.toInt()} seconds of ringing", fontSize = 13.sp)
         Slider(
             value = delaySec,
             onValueChange = { delaySec = it },
             onValueChangeFinished = { AppSettings.ringDelaySec = delaySec.toInt() },
-            valueRange = 5f..40f
+            valueRange = 0f..40f
         )
         LabeledSwitch("List and summarize all my other calls", logCalls) {
             logCalls = it
