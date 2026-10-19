@@ -430,7 +430,7 @@ class CallAudioRoute(ctx: Context) {
     fun enable() {
         try {
             oldAlarm = am.getStreamVolume(AudioManager.STREAM_ALARM)
-            am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
+            am.setStreamVolume(AudioManager.STREAM_ALARM, (am.getStreamMaxVolume(AudioManager.STREAM_ALARM) * AppSettings.callVoiceLevel).toInt().coerceAtLeast(1), 0)
         } catch (e: Exception) { }
         try {
             oldSpeaker = am.isSpeakerphoneOn
