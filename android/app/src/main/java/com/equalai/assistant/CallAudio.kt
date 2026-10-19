@@ -460,26 +460,41 @@ class CallAudioRoute(ctx: Context) {
     }
 
     private fun speakerIsOn(): Boolean = try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-        else am.isSpeakerphoneOn
-    } catch (e: Exception) { true }
+        val comm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        comm || am.isSpeakerphoneOn
+    } catch (e: Exception) { false }
 
     /**
      * Call again right after the other side answers: many phones put the call back on the earpiece at
-     * that moment. If the speaker still isn't on, press "Speaker" in the phone app (accessibility service).
+     * that moment. Tries a few times; if the speaker is still off, presses "Speaker" on the call screen
+     * (accessibility service) unless that button already shows as on.
      */
-    fun ensureSpeaker() {
+    suspend fun ensureSpeaker() {
         if (!AppSettings.speakerOn) return
-        applySpeaker()
-        if (!speakerIsOn()) {
-            val clicked = AssistantBridge.accessibilityService?.clickByText("Speaker") == true
-            AssistantBridge.log(
-                if (clicked) "Speaker was off: pressed Speaker in the phone app."
-                else "Speaker is still off. The caller may not hear the assistant."
-            )
+        var pressed = false
+        for (attempt in 1..3) {
+            applySpeaker()
+            kotlinx.coroutines.delay(400)
+            if (speakerIsOn()) {
+                AssistantBridge.log(if (pressed) "Speaker is on (pressed Speaker in the phone app)." else "Speaker is on.")
+                return
+            }
+            val svc = AssistantBridge.accessibilityService
+            if (svc != null) {
+                when (svc.pressSpeakerIfOff()) {
+                    1 -> { pressed = true; kotlinx.coroutines.delay(700); if (speakerIsOn()) { AssistantBridge.log("Speaker is on (pressed Speaker in the phone app)."); return } }
+                    0 -> { AssistantBridge.log("The phone app shows Speaker as on."); return }
+                }
+            }
+            kotlinx.coroutines.delay(700)
         }
+        AssistantBridge.log(
+            "Could not confirm the speaker is on. The assistant's voice still plays on the loud alarm channel, which " +
+                "uses the loudspeaker anyway. If the caller hears nothing, press Speaker yourself once, or turn on Accessibility."
+        )
     }
 
+    // (see PhoneRecorder below for the phone's own call recorder)
     fun restore() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
