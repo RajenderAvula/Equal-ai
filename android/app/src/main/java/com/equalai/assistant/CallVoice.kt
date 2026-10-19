@@ -212,7 +212,7 @@ object CallVoice {
     }
 
     private suspend fun playPcm(pcmIn: ByteArray, rate: Int) = withContext(Dispatchers.IO) {
-        val pcm = boost(pcmIn)
+        val pcm = if (AppSettings.headsetLoop) pcmIn else boost(pcmIn)   // through a cable, level is set by the slider only
         val usage = if (AppSettings.loudVoice) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_VOICE_COMMUNICATION
         var track: AudioTrack? = null
         try {
