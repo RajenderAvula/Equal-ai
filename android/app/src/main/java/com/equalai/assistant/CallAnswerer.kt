@@ -231,6 +231,23 @@ object CallAnswerer {
         }
         s.audioOk = (s.recorder?.peak ?: 0) >= MIC_SILENT_PEAK
         s.diag = diagnostics(s)
+        if (AppSettings.phoneRecorder == 1 || !s.audioOk) {
+            // Equal's own recording usually lacks the other person's voice (Android blocks the microphone during
+            // calls). The phone's own call recorder has both sides, so summarize that file when it exists.
+            delay(6_000)                                           // the phone finishes writing the file after hang-up
+            val dur = ((System.currentTimeMillis() - s.startedAt) / 1000).toInt()
+            val found = RecordingFinder.find(ctx, s.startedAt, dur)
+            if (found != null) {
+                val rec = snapshot(s, "SUMMARIZING", "Summarizing…")
+                    .copy(recordingFile = found.first, diag = "external:${found.second}", audioOk = true)
+                CallStore.upsert(ctx, rec)
+                AssistantBridge.callNote("Using your phone's own recording of this call (both voices).")
+                CallSummarizer.process(ctx, rec)
+                return
+            } else if (AppSettings.phoneRecorder == 1) {
+                AssistantBridge.callNote("The phone's recording of this call wasn't found (allow Audio files in Setup, or it wasn't started).")
+            }
+        }
         if ((s.recorder?.aiMixedBytes ?: 0) == 0 && !s.audioOk) {
             // nothing at all was recorded, so don't keep an empty file
             try { s.recordingFile?.delete() } catch (e: Exception) { }
