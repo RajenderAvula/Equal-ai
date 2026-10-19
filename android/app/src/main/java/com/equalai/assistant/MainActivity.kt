@@ -1054,10 +1054,27 @@ fun SetupTab(context: Context) {
     val scope = rememberCoroutineScope()
     var apiKey by remember { mutableStateOf(AppSettings.apiKey) }
     var modelName by remember { mutableStateOf(AppSettings.modelName) }
+    var models by remember { mutableStateOf(GeminiClient.fallbackModels) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var modelStatus by remember { mutableStateOf("") }
     var ownerName by remember { mutableStateOf(AppSettings.ownerName) }
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
     var level by remember { mutableStateOf(AppSettings.callVoiceLevel) }
+    var loopOn by remember { mutableStateOf(AppSettings.headsetLoop) }
+    var jackStatus by remember { mutableStateOf("checking…") }
+    LaunchedEffect(Unit) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        while (true) {
+            val types = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).map { it.type }
+            jackStatus = when {
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET in types -> "Headset with microphone detected. Good."
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES in types -> "Headphones only (no mic). Add the 2.2 kΩ resistor from mic to ground."
+                else -> "Nothing plugged into the jack."
+            }
+            kotlinx.coroutines.delay(2_000)
+        }
+    }
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
     var speakerOn by remember { mutableStateOf(AppSettings.speakerOn) }
     var logCalls by remember { mutableStateOf(AppSettings.logOtherCalls) }
@@ -1226,13 +1243,40 @@ fun SetupTab(context: Context) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        OutlinedTextField(
-            value = modelName,
-            onValueChange = { modelName = it; AppSettings.modelName = it },
-            label = { Text("Model name (needs audio input)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
+        Text("Gemini model (must accept audio)", fontSize = 13.sp)
+        Box {
+            OutlinedButton(onClick = { menuOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(modelName, modifier = Modifier.weight(1f))
+                Icon(Icons.Default.ArrowDropDown, contentDescription = "Choose model")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                (models + modelName).distinct().forEach { m ->
+                    DropdownMenuItem(
+                        text = { Text(m) },
+                        onClick = { modelName = m; AppSettings.modelName = m; menuOpen = false }
+                    )
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                scope.launch {
+                    modelStatus = "Asking Google for the models your key can use…"
+                    val list = GeminiClient.listModels()
+                    if (list != null && list.isNotEmpty()) { models = list; modelStatus = "${list.size} models found. Pick one above." }
+                    else modelStatus = "Could not load the list: ${GeminiClient.lastError.ifBlank { "no answer" }}"
+                }
+            }) { Text("Refresh list") }
+            OutlinedButton(onClick = {
+                scope.launch {
+                    modelStatus = "Testing ${AppSettings.modelName}…"
+                    val r = GeminiClient.generate("Reply with the single word OK.")
+                    modelStatus = if (r != null) "Works: Gemini answered \"${r.trim().take(40)}\"." else "Failed: ${GeminiClient.lastError.ifBlank { "no answer" }}"
+                    modelName = AppSettings.modelName
+                }
+            }) { Text("Test Gemini") }
+        }
+        if (modelStatus.isNotBlank()) Text(modelStatus, fontSize = 12.sp, color = Green)
 
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
         Text("3. Calls", fontWeight = FontWeight.Bold)
@@ -1323,13 +1367,34 @@ fun SetupTab(context: Context) {
                 "hear it. Turn off to use the normal call channel.",
             fontSize = 12.sp, color = Color.Gray
         )
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        Text("Headphone-jack loop cable (live voice into calls)", fontWeight = FontWeight.Bold)
+        LabeledSwitch("Loop cable is plugged in", loopOn) {
+            loopOn = it
+            AppSettings.headsetLoop = it
+        }
+        Text("Jack status: $jackStatus", fontSize = 12.sp, color = if (jackStatus.startsWith("Headset")) Green else Color(0xFFB45309))
+        Text(
+            "Android blocks apps from adding sound to a phone call, but a headset microphone is part of the call. " +
+                "This cable feeds the headphone output into the headset mic, so the assistant's voice goes into the call.\n\n" +
+                "Build it with a 4-pole (TRRS) 3.5 mm plug with solder tabs, which are Tip = left, Ring 1 = right, " +
+                "Ring 2 = ground, Sleeve = mic (the usual Samsung order):\n" +
+                "1. Tip (left) -> 100 kΩ resistor -> 1 µF film or ceramic capacitor -> Sleeve (mic).\n" +
+                "2. Sleeve (mic) -> 2.2 kΩ resistor -> Ring 2 (ground). This makes the phone think a headset mic is attached.\n" +
+                "3. Optional: Ring 1 (right) -> a second 100 kΩ resistor -> the same capacitor input.\n" +
+                "The 100 kΩ resistor cuts the loud headphone signal to a safe microphone level. Plug it in BEFORE the call, " +
+                "switch this on, and use the loudness slider above to set the level: if the other person hears distortion, " +
+                "lower it; if too quiet, raise it or use a 47 kΩ resistor. The caller may hear a faint echo of their own voice.",
+            fontSize = 12.sp, color = Color.Gray
+        )
         LabeledSwitch("Loudspeaker during calls", speakerOn) {
             speakerOn = it
             AppSettings.speakerOn = it
         }
         Text(
-            "On (default): the call is put on speaker. If the caller or receiver still can't hear the assistant, try " +
-                "switching this off: on some phones the speaker cancels the assistant's own voice out of the call.",
+            "Off (default, recommended): the call stays on the earpiece and the assistant speaks loudly on the alarm " +
+                "channel, so the phone's echo canceller doesn't remove it. On: the call itself is on speakerphone, and on " +
+                "many phones that cancels the assistant's voice so the other person hears nothing.",
             fontSize = 12.sp, color = Color.Gray
         )
         Text("Phone's own call recorder", fontWeight = FontWeight.SemiBold)
