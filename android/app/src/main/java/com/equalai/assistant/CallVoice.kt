@@ -233,7 +233,7 @@ object CallVoice {
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
             track = t
-            t.setVolume(1.0f)
+            t.setVolume(AppSettings.callVoiceLevel)
             t.write(pcm, 0, pcm.size)
             t.play()
             val frames = pcm.size / 2
@@ -263,7 +263,7 @@ object CallVoice {
             mp.setOnCompletionListener { done.complete(Unit) }
             mp.setOnErrorListener { _, _, _ -> error = "The voice clip could not be played."; done.complete(Unit); true }
             mp.prepare()
-            mp.setVolume(1f, 1f)
+            mp.setVolume(AppSettings.callVoiceLevel, AppSettings.callVoiceLevel)
             mp.start()
             withTimeoutOrNull(120_000L) { done.await() }
         } catch (e: Exception) {
