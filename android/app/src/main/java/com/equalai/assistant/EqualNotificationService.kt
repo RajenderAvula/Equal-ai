@@ -83,6 +83,14 @@ class EqualNotificationService : NotificationListenerService() {
         }
     }
 
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        val key = sbn?.key ?: return
+        AssistantBridge.onMain {
+            AssistantBridge.notifications.removeAll { it.key == key }
+            AssistantBridge.foregroundService?.notificationRemoved(key)
+        }
+    }
+
     fun dismissLatest() {
         val target = AssistantBridge.latestNotification ?: AssistantBridge.notifications.firstOrNull() ?: return
         try { cancelNotification(target.key) } catch (e: Exception) { }
@@ -93,15 +101,17 @@ class EqualNotificationService : NotificationListenerService() {
     /** Removes one item from Equal's list and from the phone's notification tray. */
     fun dismissItem(item: AppNotificationItem) {
         try { cancelNotification(item.key) } catch (e: Exception) { }
-        AssistantBridge.foregroundService?.notificationHandled()      // let the next waiting notification through
+        AssistantBridge.foregroundService?.notificationRemoved(item.key)   // drop it from the queue, move to the next
         AssistantBridge.onMain {
             AssistantBridge.notifications.remove(item)
             if (AssistantBridge.latestNotification === item) AssistantBridge.latestNotification = null
         }
     }
 
-    fun replyToLatest(replyText: String): Boolean {
-        val target = AssistantBridge.latestNotification ?: AssistantBridge.notifications.firstOrNull()
+    fun replyToLatest(replyText: String): Boolean =
+        replyTo(AssistantBridge.latestNotification ?: AssistantBridge.notifications.firstOrNull(), replyText)
+
+    fun replyTo(target: AppNotificationItem?, replyText: String): Boolean {
         val action = target?.replyAction ?: return false
         val remoteInputs = action.remoteInputs ?: return false
 
