@@ -48,7 +48,8 @@ data class ScheduledActionItem(
     val simSlot: Int = 0,                // 0 = SIM 1, 1 = SIM 2 (calls and texts)
     val retries: Int = 0,                // CALL_SPEAK: extra attempts left when nobody answers
     val retryGapSec: Int = 120,          // seconds before calling again (0 = right away)
-    val fallbackText: String = ""        // sent by SMS when nobody answered after all attempts
+    val fallbackText: String = "",       // sent by SMS when nobody answered after all attempts
+    val greeting: String = ""            // CALL_SPEAK: said first, before the voice clip and the custom text
 ) {
     val timeLabel: String
         get() = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(triggerAt))
@@ -65,6 +66,7 @@ data class ScheduledActionItem(
         .put("retries", retries)
         .put("gapS", retryGapSec)
         .put("fb", fallbackText)
+        .put("gr", greeting)
 
     companion object {
         fun fromJson(o: JSONObject) = ScheduledActionItem(
@@ -78,7 +80,8 @@ data class ScheduledActionItem(
             simSlot = o.optInt("sim", 0),
             retries = o.optInt("retries", 0),
             retryGapSec = if (o.has("gapS")) o.optInt("gapS", 120) else o.optInt("gap", 2) * 60,
-            fallbackText = o.optString("fb", "")
+            fallbackText = o.optString("fb", ""),
+            greeting = o.optString("gr", "")
         )
     }
 }
@@ -228,7 +231,7 @@ object AppSettings {
 
     var ringDelaySec: Int
         get() = prefs.getInt("ring_delay", 15)
-        set(v) { prefs.edit().putInt("ring_delay", v.coerceIn(5, 60)).apply() }
+        set(v) { prefs.edit().putInt("ring_delay", v.coerceIn(0, 60)).apply() }
 
     var ownerName: String
         get() = prefs.getString("owner_name", "") ?: ""
@@ -258,6 +261,11 @@ object AppSettings {
     var defaultSim: Int
         get() = prefs.getInt("default_sim", 0)
         set(v) { prefs.edit().putInt("default_sim", v.coerceIn(0, 1)).apply() }
+
+    /** Custom greeting the assistant says first to every caller who rings you. Blank = the standard greeting. */
+    var greeting: String
+        get() = prefs.getString("greeting", "") ?: ""
+        set(v) { prefs.edit().putString("greeting", v.trim()).apply() }
 
     /** Custom text the assistant tells or asks every caller, on top of its normal questions. */
     var callerNote: String
