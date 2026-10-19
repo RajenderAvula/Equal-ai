@@ -136,6 +136,10 @@ class EqualAccessibilityService : AccessibilityService() {
         return -1
     }
 
+    /** Short one-line list of what other apps' windows show right now (texts and button labels), for diagnostics. */
+    fun screenSummary(maxChars: Int = 450): String =
+        readAllWindows(maxChars, includePackages = true).replace('\n', '|').take(maxChars).ifBlank { "nothing readable" }
+
     /** True if any other app's window shows this text (or content description). */
     fun hasText(text: String): Boolean {
         val needle = text.trim()
