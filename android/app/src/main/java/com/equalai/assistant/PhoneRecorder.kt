@@ -73,7 +73,7 @@ object PhoneRecorder {
                 } else {
                     AssistantBridge.callNote(
                         "Phone recorder: no Record button found on screen. Equal can see: " +
-                            svc.readAllWindows(200).replace('\n', ' | ').ifBlank { "nothing (call screen hidden, or phone locked?)" }
+                            svc.readAllWindows(200).replace("\n", " | ").ifBlank { "nothing (call screen hidden, or phone locked?)" }
                     )
                 }
                 ok
