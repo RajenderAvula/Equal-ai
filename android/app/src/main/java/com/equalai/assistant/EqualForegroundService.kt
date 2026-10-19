@@ -143,7 +143,12 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
                     isListening = false
                     lastNote = ""
                     AssistantBridge.promptInTextBoxCallback?.invoke(text)
-                    if (text.isNotBlank()) handleSpoken(text)
+                    if (text.isNotBlank() && handleSpoken(text)) {
+                        // command accepted and running: empty the box so it doesn't look like it is waiting for Enter
+                        AssistantBridge.promptInTextBoxCallback?.invoke("")
+                    } else if (text.isNotBlank() && AssistantBridge.wakeWordRequired) {
+                        note("Heard \"$text\" but ignored it: say \"Hey Equal\" first, or tap the mic button.")
+                    }
                     scheduleRestart(700)
                 },
                 onFail = { code, msg ->
@@ -173,7 +178,7 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
         main.postDelayed(restartRunnable, delayMs)
     }
 
-    private fun handleSpoken(raw: String) {
+    private fun handleSpoken(raw: String): Boolean {
         val text = raw.trim()
         val now = System.currentTimeMillis()
         val force = AssistantBridge.forceNextCommand
@@ -182,18 +187,19 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
 
         // Ambient speech (TV, other people) is ignored unless the wake word was said,
         // the mic button was tapped, or we just asked a question.
-        if (AssistantBridge.wakeWordRequired && !heardWake && !force && !inFollowUp) return
+        if (AssistantBridge.wakeWordRequired && !heardWake && !force && !inFollowUp) return false
 
         AssistantBridge.forceNextCommand = false
         AssistantBridge.followUpUntil = 0L
 
         if (heardWake && command.isBlank()) {
             speakBackground("Yes?", listenAfter = true)
-            return
+            return false
         }
         val cmd = if (heardWake) command else text
         AssistantBridge.log("Command: \"$cmd\"")
         scope.launch { CommandRouter.handle(applicationContext, cmd) }
+        return true
     }
 
     // ---------------------------------------------------------------- notification queue
@@ -238,6 +244,42 @@ class EqualForegroundService : Service(), TextToSpeech.OnInitListener {
         )
         main.removeCallbacks(notifTimeout)
         main.postDelayed(notifTimeout, 45_000L)                     // safety net if nothing is ever said
+    }
+
+    /**
+     * A notification was cleared (swiped away, dismissed in Equal, or removed by its app): drop it from the
+     * waiting line, and if it is the one being shown or read out, stop and move on to the next.
+     */
+    fun notificationRemoved(key: String) {
+        main.post {
+            notifQueue.removeAll { it.key == key }
+            val active = notifActive
+            if (active != null && active.key == key) {
+                main.removeCallbacks(notifTimeout)
+                if (AssistantBridge.latestNotification?.key == key) AssistantBridge.latestNotification = null
+                notifActive = null
+                tts?.stop()
+                isSpeaking = false
+                AssistantBridge.promptInTextBoxCallback?.invoke("")
+                if (notifQueue.isNotEmpty()) nextNotification()
+            } else if (active != null) {
+                AssistantBridge.promptInTextBoxCallback?.invoke(promptFor(active))     // update the waiting count
+            }
+        }
+    }
+
+    /** "Clear all" in the app: forget every waiting notification too. */
+    fun clearNotificationQueue() {
+        main.post {
+            notifQueue.clear()
+            main.removeCallbacks(notifTimeout)
+            if (notifActive != null) {
+                notifActive = null
+                tts?.stop()
+                isSpeaking = false
+                AssistantBridge.promptInTextBoxCallback?.invoke("")
+            }
+        }
     }
 
     /** You answered (spoken or typed): move on to the next waiting notification shortly. */
