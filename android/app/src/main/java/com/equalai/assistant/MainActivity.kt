@@ -1046,6 +1046,7 @@ fun SetupTab(context: Context) {
     var ownerName by remember { mutableStateOf(AppSettings.ownerName) }
     var delaySec by remember { mutableStateOf(AppSettings.ringDelaySec.toFloat()) }
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
+    var level by remember { mutableStateOf(AppSettings.callVoiceLevel) }
     var loud by remember { mutableStateOf(AppSettings.loudVoice) }
     var speakerOn by remember { mutableStateOf(AppSettings.speakerOn) }
     var logCalls by remember { mutableStateOf(AppSettings.logOtherCalls) }
@@ -1281,6 +1282,18 @@ fun SetupTab(context: Context) {
             onValueChange = { speed = it },
             onValueChangeFinished = { AppSettings.speechRate = speed },
             valueRange = 0.4f..1.2f
+        )
+        Text("Voice loudness on calls: ${(level * 100).toInt()}%", fontSize = 13.sp)
+        Slider(
+            value = level,
+            onValueChange = { level = it },
+            onValueChangeFinished = { AppSettings.callVoiceLevel = level },
+            valueRange = 0.3f..1.0f
+        )
+        Text(
+            "If the caller hears a faint, garbled voice, try 60 to 80%: at full volume the speaker beside the microphone " +
+                "can distort. Also try switching \"Loudspeaker during calls\" off below.",
+            fontSize = 12.sp, color = Color.Gray
         )
         SetupButton("Test the voice") {
             scope.launch {
