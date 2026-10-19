@@ -893,6 +893,7 @@ fun CallsTab(context: Context) {
     var autoAnswer by remember { mutableStateOf(AppSettings.autoAnswer) }
     var callerNote by remember { mutableStateOf(AppSettings.callerNote) }
     var greetingText by remember { mutableStateOf(AppSettings.greeting) }
+    var showSettings by remember { mutableStateOf(false) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -930,7 +931,9 @@ fun CallsTab(context: Context) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      item {
+       Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -949,8 +952,15 @@ fun CallsTab(context: Context) {
             }
         }
 
-        Text("Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray)
+        Text(
+            "Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray,
+            maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
 
+        TextButton(onClick = { showSettings = !showSettings }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (showSettings) "Hide call messages ▲" else "Call messages and recordings ▼")
+        }
+        if (showSettings) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
             value = greetingText,
             onValueChange = { greetingText = it; AppSettings.greeting = it },
@@ -972,9 +982,11 @@ fun CallsTab(context: Context) {
             onClick = { importPicker.launch(arrayOf("audio/*")) },
             modifier = Modifier.fillMaxWidth()
         ) { Text("Summarize a recording (pick an audio file)") }
+        }
 
         Text("Call history", fontWeight = FontWeight.Bold)
-        LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+       }
+      }
             items(AssistantBridge.callLogs, key = { it.id }) { call ->
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -1031,7 +1043,6 @@ fun CallsTab(context: Context) {
                 }
             }
         }
-    }
 }
 
 // ============================================================================
