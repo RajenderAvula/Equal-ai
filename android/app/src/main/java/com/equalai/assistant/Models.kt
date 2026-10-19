@@ -247,6 +247,11 @@ object AppSettings {
         get() = prefs.getBoolean("speaker_on", true)
         set(v) { prefs.edit().putBoolean("speaker_on", v).apply() }
 
+    /** How loud the assistant's voice is on calls: 0.3 to 1.0 (the speaker next to the mic can distort at full volume). */
+    var callVoiceLevel: Float
+        get() = prefs.getFloat("call_voice_level", 1.0f)
+        set(v) { prefs.edit().putFloat("call_voice_level", v.coerceIn(0.3f, 1.0f)).apply() }
+
     /** The phone's own call recorder during calls: 0 = leave it alone, 1 = switch ON (default), 2 = switch OFF. */
     var phoneRecorder: Int
         get() = prefs.getInt("phone_recorder", 1)
