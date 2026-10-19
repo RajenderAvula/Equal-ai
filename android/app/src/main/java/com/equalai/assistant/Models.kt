@@ -247,9 +247,9 @@ object AppSettings {
         get() = prefs.getBoolean("speaker_on", true)
         set(v) { prefs.edit().putBoolean("speaker_on", v).apply() }
 
-    /** The phone's own call recorder during calls: 0 = leave it alone, 1 = switch ON, 2 = switch OFF. */
+    /** The phone's own call recorder during calls: 0 = leave it alone, 1 = switch ON (default), 2 = switch OFF. */
     var phoneRecorder: Int
-        get() = prefs.getInt("phone_recorder", 0)
+        get() = prefs.getInt("phone_recorder", 1)
         set(v) { prefs.edit().putInt("phone_recorder", v.coerceIn(0, 2)).apply() }
 
     /** List every call (not just Equal's) in Call history and summarize it when a recording can be found. */
