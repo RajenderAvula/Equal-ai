@@ -11,8 +11,8 @@ android {
         applicationId = "com.equalai.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "3.0"
         // The Google API key is no longer baked into the APK.
         // Paste it in Setup after installing; it is stored encrypted on the phone.
     }
