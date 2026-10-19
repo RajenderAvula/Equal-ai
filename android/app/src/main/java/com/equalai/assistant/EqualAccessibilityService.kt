@@ -110,6 +110,32 @@ class EqualAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /**
+     * Finds the call screen's Speaker button and presses it only if it is not already switched on.
+     * Returns 1 = pressed it, 0 = it is already on, -1 = button not found.
+     */
+    fun pressSpeakerIfOff(): Int {
+        val roots: List<AccessibilityNodeInfo> = try { windows.mapNotNull { it.root } } catch (e: Exception) { emptyList() }
+        for (root in if (roots.isNotEmpty()) roots else listOfNotNull(rootInActiveWindow)) {
+            if (root.packageName?.toString() == packageName) continue
+            for (label in listOf("Speaker", "Speakerphone", "Loudspeaker")) {
+                for (node in root.findAccessibilityNodeInfosByText(label)) {
+                    var n: AccessibilityNodeInfo? = node
+                    var hops = 0
+                    while (n != null && hops < 6) {
+                        if (n.isClickable && n.isEnabled) {
+                            if (n.isChecked || n.isSelected) return 0
+                            return if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) 1 else -1
+                        }
+                        n = n.parent
+                        hops++
+                    }
+                }
+            }
+        }
+        return -1
+    }
+
     /** True if any other app's window shows this text (or content description). */
     fun hasText(text: String): Boolean {
         val needle = text.trim()
