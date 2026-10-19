@@ -25,8 +25,17 @@ object PhoneRecorder {
     fun onCallActive() {
         val mode = AppSettings.phoneRecorder
         if (mode == 0) return
-        for (delay in longArrayOf(1500, 3500, 7000)) {
-            handler.postDelayed({ if (apply(mode)) handler.removeCallbacksAndMessages(null) }, delay)
+        val delays = longArrayOf(1500, 3500, 7000)
+        for ((i, delay) in delays.withIndex()) {
+            handler.postDelayed({
+                if (apply(mode)) handler.removeCallbacksAndMessages(null)
+                else if (i == delays.lastIndex) {
+                    AssistantBridge.callNote(
+                        "Phone recorder: Record button not found. Call screen shows: " +
+                            (AssistantBridge.accessibilityService?.screenSummary() ?: "(accessibility off)")
+                    )
+                }
+            }, delay)
         }
     }
 
@@ -61,6 +70,11 @@ object PhoneRecorder {
                             else "Phone recorder: Record wasn't found in the menu. Start it by hand once and tell me what it says."
                         )
                     }, 800)
+                } else {
+                    AssistantBridge.callNote(
+                        "Phone recorder: no Record button found on screen. Equal can see: " +
+                            svc.readAllWindows(200).replace('\n', ' | ').ifBlank { "nothing (call screen hidden, or phone locked?)" }
+                    )
                 }
                 ok
             }
