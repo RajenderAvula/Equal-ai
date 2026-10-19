@@ -445,7 +445,14 @@ class CallAudioRoute(ctx: Context) {
     }
 
     private fun applySpeaker() {
-        if (!AppSettings.speakerOn) return
+        if (!AppSettings.useSpeaker) {
+            // keep the call on the earpiece: the phone's echo canceller then leaves the assistant's loud voice alone
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
+                am.isSpeakerphoneOn = false
+            } catch (e: Exception) { }
+            return
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val speaker = am.availableCommunicationDevices
@@ -470,7 +477,7 @@ class CallAudioRoute(ctx: Context) {
      * (accessibility service) unless that button already shows as on.
      */
     suspend fun ensureSpeaker() {
-        if (!AppSettings.speakerOn) return
+        if (!AppSettings.useSpeaker) return
         var pressed = false
         for (attempt in 1..3) {
             applySpeaker()
