@@ -22,6 +22,9 @@ import android.os.PowerManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CancellationException
@@ -104,13 +107,38 @@ object RelayClient {
         Unit
     }
 
+    /** Receiver heartbeat: the receiving phone writes the time here every minute. */
+    suspend fun heartbeat() = withContext(Dispatchers.IO) {
+        try { request("PUT", "alive", JSONObject().put("ts", System.currentTimeMillis()).toString()) } catch (e: Exception) { }
+        Unit
+    }
+
+    /** Seconds since the receiving phone last checked in, or null if it never has / can't be read. */
+    suspend fun receiverAgeSec(): Long? = withContext(Dispatchers.IO) {
+        try {
+            val (code, text) = request("GET", "alive", null)
+            if (code !in 200..299 || text.isBlank() || text == "null") null
+            else (System.currentTimeMillis() - JSONObject(text).optLong("ts")) / 1000
+        } catch (e: Exception) { null }
+    }
+
+    fun ageLabel(sec: Long?): String = when {
+        sec == null -> "The receiving phone has never checked in (Equal isn't running there, or its receiver switch is off)."
+        sec < 150 -> "The receiving phone is online (checked in ${sec}s ago)."
+        else -> "The receiving phone last checked in ${sec / 60} min ago, so its receiver has probably been stopped. " +
+            "Open Equal on that phone, and set its battery use to Unrestricted."
+    }
+
     /** Connection check for the Setup screen. */
     suspend fun test(): String = withContext(Dispatchers.IO) {
         if (!configured) return@withContext "Fill in the database link (https://…) and a pairing code of 12 or more characters."
         try {
             val (code, _) = request("PUT", "ping", JSONObject().put("ts", System.currentTimeMillis()).toString())
             when {
-                code in 200..299 -> { try { request("DELETE", "ping", null) } catch (e: Exception) { }; "Connected." }
+                code in 200..299 -> {
+                    try { request("DELETE", "ping", null) } catch (e: Exception) { }
+                    "Connected. " + ageLabel(receiverAgeSecBlocking())
+                }
                 code == 401 || code == 403 -> "Firebase refused it (HTTP $code). Paste the rules from the instructions into Realtime Database > Rules and Publish."
                 code == 404 -> "Not found (HTTP 404). Check the database link."
                 else -> "HTTP $code."
@@ -184,6 +212,12 @@ object RelayClient {
         items.sortedBy { it.second.optLong("ts") }.forEach { (k, v) -> if (seen.add(k)) onMessage(k, v) }
     }
 
+    private fun receiverAgeSecBlocking(): Long? = try {
+        val (code, text) = request("GET", "alive", null)
+        if (code !in 200..299 || text.isBlank() || text == "null") null
+        else (System.currentTimeMillis() - JSONObject(text).optLong("ts")) / 1000
+    } catch (e: Exception) { null }
+
     fun randomCode(): String {
         val chars = "abcdefghjkmnpqrstuvwxyz23456789"
         return (1..16).map { chars.random() }.joinToString("")
@@ -201,6 +235,8 @@ class RelayReceiverService : Service() {
     private var listenJob: Job? = null
     private var worker: Job? = null
     private var watchdog: Job? = null
+    private var beat: Job? = null
+    @Volatile private var activeRecord: AudioRecord? = null
 
     private var tts: TextToSpeech? = null
     private val ttsReady = CompletableDeferred<Boolean>()
@@ -209,6 +245,19 @@ class RelayReceiverService : Service() {
     @Volatile private var lastActivity = 0L
     private var oldMusic = -1
     private var wake: PowerManager.WakeLock? = null
+
+    private var handleJob: Job? = null
+    @Volatile private var ignoreUntil = 0L
+
+    companion object {
+        const val ACTION_HANGUP = "com.equalai.assistant.RELAY_HANGUP"
+        /** True while a call from Equal is going on (drives the Hang up button in the app). */
+        var live by mutableStateOf(false)
+
+        fun hangUp(ctx: Context) {
+            try { ctx.startService(Intent(ctx, RelayReceiverService::class.java).setAction(ACTION_HANGUP)) } catch (e: Exception) { }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -237,16 +286,42 @@ class RelayReceiverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_HANGUP) {
+            scope.launch {
+                abortCurrent()
+                RelayClient.send("r2c", JSONObject().put("kind", "hangup"))
+            }
+            return START_STICKY
+        }
         if (!AppSettings.receiverOn || !RelayClient.configured) {
             stopSelf()
             return START_NOT_STICKY
         }
         if (listenJob?.isActive != true) {
-            listenJob = RelayClient.listen(scope, "c2r") { key, msg -> inbox.trySend(key to msg) }
+            listenJob = RelayClient.listen(scope, "c2r") { key, msg ->
+                if (msg.optString("kind") == "abort") {
+                    // the caller cancelled: stop right now instead of waiting behind queued messages
+                    scope.launch {
+                        RelayClient.delete("c2r/$key")
+                        abortCurrent()
+                    }
+                } else inbox.trySend(key to msg)
+            }
             worker = scope.launch {
                 for ((key, msg) in inbox) {
-                    try { handle(key, msg) } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { AssistantBridge.log("Receiver error: ${e.localizedMessage}") }
+                    val j = scope.launch {
+                        try { handle(key, msg) } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { AssistantBridge.log("Receiver error: ${e.localizedMessage}") }
+                    }
+                    handleJob = j
+                    j.join()
+                }
+            }
+            beat?.cancel()
+            beat = scope.launch {
+                while (isActive) {
+                    RelayClient.heartbeat()
+                    delay(45_000)
                 }
             }
             AssistantBridge.log("Call receiver is on")
@@ -256,6 +331,7 @@ class RelayReceiverService : Service() {
 
     override fun onDestroy() {
         listenJob?.cancel()
+        beat?.cancel()
         worker?.cancel()
         watchdog?.cancel()
         scope.cancel()
@@ -264,15 +340,34 @@ class RelayReceiverService : Service() {
         super.onDestroy()
     }
 
-    private fun notification(text: String): Notification {
+    private fun notification(text: String, withHangUp: Boolean = false): Notification {
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return NotificationCompat.Builder(this, "equal_relay")
+        val b = NotificationCompat.Builder(this, "equal_relay")
             .setContentTitle("Equal AI")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentIntent(pi)
             .setOngoing(true)
-            .build()
+        if (withHangUp) {
+            val hang = PendingIntent.getService(
+                this, 7, Intent(this, RelayReceiverService::class.java).setAction(ACTION_HANGUP), PendingIntent.FLAG_IMMUTABLE
+            )
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Hang up", hang)
+        }
+        return b.build()
+    }
+
+    private fun showNotification(text: String, withHangUp: Boolean) {
+        try { getSystemService(NotificationManager::class.java)?.notify(1002, notification(text, withHangUp)) } catch (e: Exception) { }
+    }
+
+    /** Stops whatever is playing or recording, drops queued messages, and ends the call on this phone. */
+    private fun abortCurrent() {
+        ignoreUntil = System.currentTimeMillis() + 20_000
+        handleJob?.cancel()
+        try { activeRecord?.stop() } catch (e: Exception) { }
+        while (inbox.tryReceive().isSuccess) { }
+        finishCall()
     }
 
     // ---------------------------------------------------------------- handling messages
@@ -280,6 +375,8 @@ class RelayReceiverService : Service() {
     private suspend fun handle(key: String, msg: JSONObject) {
         RelayClient.delete("c2r/$key")
         if (System.currentTimeMillis() - msg.optLong("ts") > 150_000) return        // an old message from a missed call
+        if (msg.optString("kind") != "ring" && System.currentTimeMillis() < ignoreUntil) return   // call was hung up
+        if (msg.optString("kind") == "ring") ignoreUntil = 0L
         lastActivity = System.currentTimeMillis()
         when (msg.optString("kind")) {
             "ring" -> beginCall()
@@ -312,6 +409,8 @@ class RelayReceiverService : Service() {
             return
         }
         inCall = true
+        live = true
+        showNotification("Call from Equal in progress", true)
         lastActivity = System.currentTimeMillis()
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -339,6 +438,8 @@ class RelayReceiverService : Service() {
     private fun finishCall() {
         if (!inCall) return
         inCall = false
+        live = false
+        showNotification("Waiting for calls from Equal", false)
         watchdog?.cancel()
         try { tts?.stop() } catch (e: Exception) { }
         try {
@@ -361,9 +462,14 @@ class RelayReceiverService : Service() {
                 r.audioAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
             }
-            r.play()
-            delay(3_500)
-            r.stop()
+            try {
+                r.play()
+                delay(3_500)
+            } finally {
+                r.stop()                                         // also when the call is hung up during the ring
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             delay(500)
         }
@@ -455,7 +561,12 @@ class RelayReceiverService : Service() {
 
     private suspend fun listenAndReply() {
         beep()
-        val pcm = withContext(Dispatchers.IO) { recordReply() }
+        // if the microphone ever blocks, stop it after 30 s so later calls aren't stuck behind this one
+        val guard = scope.launch {
+            delay(30_000)
+            try { activeRecord?.stop() } catch (e: Exception) { }
+        }
+        val pcm = try { withContext(Dispatchers.IO) { recordReply() } } finally { guard.cancel() }
         val reply = JSONObject().put("kind", "reply")
         if (pcm != null && pcm.isNotEmpty()) {
             val wav = Wav.header(pcm.size, 16_000) + pcm
@@ -472,6 +583,7 @@ class RelayReceiverService : Service() {
             AudioRecord(MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, 8192))
         } catch (e: Exception) { return null }
         if (ar.state != AudioRecord.STATE_INITIALIZED) { ar.release(); return null }
+        activeRecord = ar
         val out = ByteArrayOutputStream()
         val pre = ArrayDeque<ByteArray>()
         val buf = ByteArray(3_200)                                   // 100 ms
@@ -505,6 +617,7 @@ class RelayReceiverService : Service() {
         } catch (e: Exception) {
             AssistantBridge.log("Receiver microphone error: ${e.localizedMessage}")
         } finally {
+            activeRecord = null
             try { ar.stop() } catch (e: Exception) { }
             ar.release()
         }
@@ -533,6 +646,20 @@ object RelayCall {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var running = false
+    @Volatile private var currentInbox: Channel<JSONObject>? = null
+
+    /** True while an app call is going on (drives the Cancel call button in the app). */
+    var active by mutableStateOf(false)
+
+    /** Hangs up from this phone: the other phone stops ringing/speaking at once. */
+    fun cancel() {
+        if (!running) return
+        currentInbox?.trySend(JSONObject().put("kind", "hangup").put("by", "you"))
+        scope.launch {
+            RelayClient.delete("c2r")
+            RelayClient.send("c2r", JSONObject().put("kind", "abort"))
+        }
+    }
     private const val MAX_TURNS = 8
     private const val MAX_MS = 6 * 60_000L
 
@@ -545,6 +672,7 @@ object RelayCall {
             return
         }
         running = true
+        active = true
         scope.launch {
             var wl: PowerManager.WakeLock? = null
             try {
@@ -560,6 +688,8 @@ object RelayCall {
                 AssistantBridge.callNote("App call failed: ${e.localizedMessage}")
             } finally {
                 running = false
+                active = false
+                currentInbox = null
                 try { wl?.let { if (it.isHeld) it.release() } } catch (e: Exception) { }
             }
         }
@@ -574,55 +704,50 @@ object RelayCall {
         val id = "app_${System.currentTimeMillis()}"
         val started = System.currentTimeMillis()
         val lines = ArrayList<String>()
+        val notes = ArrayList<String>()
         val owner = AppSettings.ownerName.ifBlank { "the owner" }
         val lang = Locale.getDefault().toLanguageTag()
+        val inbox = Channel<JSONObject>(Channel.UNLIMITED)
+        currentInbox = inbox
+
+        fun note(m: String) { notes.add(m); AssistantBridge.callNote("App call: $m") }
 
         fun save(state: String, summary: String) {
             CallStore.upsert(
                 ctx,
                 CallRecord(
                     id = id, number = task.target, caller = "App call to ${task.target}", summary = summary,
-                    transcript = lines.joinToString("\n"), startedAt = started, updatedAt = System.currentTimeMillis(),
+                    transcript = (lines + notes.map { "(note) $it" }).joinToString("\n"), startedAt = started,
+                    updatedAt = System.currentTimeMillis(),
                     durationSec = ((System.currentTimeMillis() - started) / 1000).toInt(), state = state, audioOk = true
                 )
             )
         }
 
-        val inbox = Channel<JSONObject>(Channel.UNLIMITED)
         RelayClient.delete("r2c")
         RelayClient.delete("c2r")
         val listener = RelayClient.listen(scope, "r2c") { key, msg ->
             scope.launch { RelayClient.delete("r2c/$key") }
             if (System.currentTimeMillis() - msg.optLong("ts") < 180_000) {
-                if (msg.optString("kind") == "info") AssistantBridge.callNote("App call: ${msg.optString("text")}")
-                else inbox.trySend(msg)
+                if (msg.optString("kind") == "info") note(msg.optString("text")) else inbox.trySend(msg)
             }
         }
+        var hungUp = false
+        // waits for a message of this kind; a hang-up from either side ends the wait
+        suspend fun waitFor(kind: String, ms: Long): JSONObject? = withTimeoutOrNull(ms) {
+            var got: JSONObject? = null
+            while (got == null) {
+                val m = inbox.receive()
+                val k = m.optString("kind")
+                if (k == kind) got = m
+                else if (k == "hangup") { hungUp = true; got = m }
+            }
+            got
+        }?.takeIf { !hungUp }
+
         try {
             save("ANSWERING", "Calling…")
-            AssistantBridge.callNote("Calling ${task.target} through the Equal app…")
-            if (!RelayClient.send("c2r", JSONObject().put("kind", "ring"))) {
-                AssistantBridge.callNote("App call: could not reach the database (no internet or wrong link).")
-                save("DONE", "App call could not be placed: no connection to the database.")
-                noAnswer(ctx, task, "no connection")
-                return
-            }
-            val ack = withTimeoutOrNull(45_000) {
-                var got: JSONObject? = null
-                while (got == null) {
-                    val m = inbox.receive()
-                    if (m.optString("kind") == "ack") got = m
-                }
-                got
-            }
-            if (ack == null) {
-                RelayClient.delete("c2r")                              // so it doesn't ring later
-                save("DONE", "Their phone didn't pick up (Equal not running there, or no internet).")
-                noAnswer(ctx, task, "not answered")
-                return
-            }
-            AssistantBridge.callNote("App call answered by their phone.")
-            save("ANSWERING", "Call in progress…")
+            note("calling ${task.target} through the Equal app. " + RelayClient.ageLabel(RelayClient.receiverAgeSec()))
 
             suspend fun say(text: String, listen: Boolean) {
                 RelayClient.send("c2r", JSONObject().put("kind", "say").put("text", text).put("listen", listen).put("lang", lang))
@@ -633,10 +758,8 @@ object RelayCall {
             val clipFile = task.attachmentUri?.let { File(it) }
             val clip = clipFile?.takeIf { it.exists() && it.length() in 1..9_000_000 }
             if (clipFile != null && clip == null) {
-                AssistantBridge.callNote(
-                    if (!clipFile.exists()) "App call: the voice message file is missing, so it was skipped."
-                    else "App call: the voice message is over 9 MB, so it was skipped. Use a shorter clip."
-                )
+                note(if (!clipFile.exists()) "the voice message file is missing, so it was skipped."
+                     else "the voice message is over 9 MB, so it was skipped. Use a shorter clip.")
             }
             val whyNot = when {
                 !task.converse -> ""
@@ -646,28 +769,52 @@ object RelayCall {
                 else -> ""
             }
             val canTalk = task.converse && whyNot.isEmpty()
-            if (task.converse && !canTalk) AssistantBridge.callNote("App call: the assistant won't talk because $whyNot.")
+            if (task.converse && !canTalk) note("the assistant won't talk because $whyNot.")
 
+            // Everything is posted up front, in order, so it uploads while their phone is still ringing.
+            if (!RelayClient.send("c2r", JSONObject().put("kind", "ring"))) {
+                note("could not reach the database (no internet, or the link is wrong).")
+                save("DONE", "App call could not be placed: no connection to the database.")
+                noAnswer(ctx, task, "no connection")
+                return
+            }
             if (hello.isNotBlank()) {
                 lines.add("Assistant: $hello")
                 say(hello, listen = false)
             }
             if (clip != null) {
                 lines.add("Assistant: [pre-recorded voice message]")
-                val lastPart = text.isBlank()
                 RelayClient.send(
                     "c2r",
                     JSONObject().put("kind", "clip").put("ext", clip.extension.ifBlank { "m4a" })
                         .put("audio", Base64.encodeToString(clip.readBytes(), Base64.NO_WRAP))
-                        .put("listen", lastPart && canTalk)
+                        .put("listen", text.isBlank() && canTalk)
                 )
             }
             if (text.isNotBlank()) {
                 lines.add("Assistant: $text")
                 say(text, listen = canTalk)
+            } else if (canTalk && clip == null && hello.isBlank()) {
+                say("", listen = true)
             } else if (canTalk && clip == null) {
                 say("", listen = true)
             }
+
+            val ack = waitFor("ack", 45_000)
+            if (hungUp) {
+                note("call cancelled.")
+                RelayClient.delete("c2r")
+                save("DONE", "Call cancelled before it was answered.")
+                return
+            }
+            if (ack == null) {
+                RelayClient.delete("c2r")                              // so it doesn't ring later
+                save("DONE", "Their phone didn't pick up (Equal not running there, or no internet).")
+                noAnswer(ctx, task, "not answered")
+                return
+            }
+            note("answered by their phone.")
+            save("ANSWERING", "Call in progress…")
 
             var closed = false
             if (canTalk) {
@@ -680,17 +827,14 @@ object RelayCall {
                 var silent = 0
                 for (turn in 1..MAX_TURNS) {
                     if (System.currentTimeMillis() - started > MAX_MS) break
-                    val reply = withTimeoutOrNull(if (turn == 1) 120_000 else 75_000) {
-                        var got: JSONObject? = null
-                        while (got == null) {
-                            val m = inbox.receive()
-                            if (m.optString("kind") == "reply") got = m
-                        }
-                        got
-                    } ?: break
+                    note("waiting for their answer…")
+                    val reply = waitFor("reply", if (turn == 1) 120_000 else 75_000)
+                    if (hungUp) break
+                    if (reply == null) { note("no answer came back from their phone."); break }
                     val audio = reply.optString("audio")
                     if (audio.isBlank()) {
                         silent++
+                        note("their phone heard nothing ($silent).")
                         if (silent >= 2) break
                         lines.add("Assistant: I didn't hear you. Could you say that again?")
                         say("I didn't hear you. Could you say that again?", listen = true)
@@ -698,9 +842,15 @@ object RelayCall {
                     }
                     silent = 0
                     val wav = Base64.decode(audio, Base64.NO_WRAP)
-                    val r = askGemini(wav, owner, context, lines) ?: break
+                    note("got their answer (${wav.size / 1024} KB), asking Gemini…")
+                    val r = askGemini(wav, owner, context, lines)
+                    if (r == null) {
+                        note("Gemini did not answer: ${GeminiClient.lastError.ifBlank { "unknown error" }}")
+                        break
+                    }
                     if (r.said.isNotBlank()) lines.add("Person: ${r.said}")
                     if (r.reply.isNotBlank()) lines.add("Assistant: ${r.reply}")
+                    if (r.reply.isBlank()) { note("Gemini's reply was empty."); break }
                     if (r.done) {
                         say(r.reply, listen = false)
                         closed = true
@@ -709,13 +859,17 @@ object RelayCall {
                     say(r.reply, listen = true)
                     save("ANSWERING", "Call in progress…")
                 }
-                if (!closed) {
+                if (!closed && !hungUp) {
                     lines.add("Assistant: Thank you. Goodbye.")
                     say("Thank you. Goodbye.", listen = false)
                 }
             }
-            RelayClient.send("c2r", JSONObject().put("kind", "end"))
-            delay(1_500)
+            if (hungUp) {
+                note("call ended by hang-up.")
+            } else {
+                RelayClient.send("c2r", JSONObject().put("kind", "end"))
+                delay(1_500)
+            }
 
             save("SUMMARIZING", "Summarizing…")
             val summary = summarize(lines, owner, canTalk)
