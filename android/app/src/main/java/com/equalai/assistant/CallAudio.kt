@@ -426,6 +426,9 @@ class CallAudioRoute(ctx: Context) {
     private var oldSpeaker = false
     private var oldVolume = -1
     private var oldAlarm = -1
+    /** WhatsApp calls: the call's own echo canceller doesn't remove the assistant's voice, so use the speaker. */
+    var forceSpeaker = false
+    private val useSpk: Boolean get() = forceSpeaker || AppSettings.useSpeaker
 
     fun enable() {
         try {
@@ -445,7 +448,7 @@ class CallAudioRoute(ctx: Context) {
     }
 
     private fun applySpeaker() {
-        if (!AppSettings.useSpeaker) {
+        if (!useSpk) {
             // keep the call on the earpiece: the phone's echo canceller then leaves the assistant's loud voice alone
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
@@ -477,7 +480,7 @@ class CallAudioRoute(ctx: Context) {
      * (accessibility service) unless that button already shows as on.
      */
     suspend fun ensureSpeaker() {
-        if (!AppSettings.useSpeaker) return
+        if (!useSpk) return
         var pressed = false
         for (attempt in 1..3) {
             applySpeaker()
