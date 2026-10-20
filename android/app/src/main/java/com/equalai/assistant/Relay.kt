@@ -287,12 +287,15 @@ class RelayReceiverService : Service() {
                 if (!inCall) beginCall(silent = true)
                 val lang = msg.optString("lang")
                 val text = msg.optString("text").trim()
-                if (text.isNotBlank()) speak(text, lang)
+                if (text.isNotBlank() && !speak(text, lang)) {
+                    info("their phone's voice engine could not speak. Check Settings > Text-to-speech on that phone.")
+                }
                 if (msg.optBoolean("listen")) listenAndReply()
             }
             "clip" -> {
                 if (!inCall) beginCall(silent = true)
-                playClip(msg.optString("audio"), msg.optString("ext", "m4a"))
+                val why = playClip(msg.optString("audio"), msg.optString("ext", "m4a"))
+                info(if (why == null) "the voice message played on their phone." else "the voice message did not play: $why")
                 if (msg.optBoolean("listen")) listenAndReply()
             }
             "end" -> {
@@ -375,9 +378,10 @@ class RelayReceiverService : Service() {
         } catch (e: Exception) { }
     }
 
-    private suspend fun speak(text: String, lang: String) {
-        val t = tts ?: return
-        if (withTimeoutOrNull(5_000) { ttsReady.await() } != true) return
+    private suspend fun speak(text: String, lang: String): Boolean {
+        val t = tts ?: return false
+        if (withTimeoutOrNull(5_000) { ttsReady.await() } != true) return false
+        var failed = false
         try {
             if (lang.isNotBlank()) {
                 val r = t.setLanguage(Locale.forLanguageTag(lang))
@@ -392,46 +396,59 @@ class RelayReceiverService : Service() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) { if (utteranceId == id && cont.isActive) cont.resume(Unit) }
                     @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) { if (utteranceId == id && cont.isActive) cont.resume(Unit) }
+                    override fun onError(utteranceId: String?) { failed = true; if (utteranceId == id && cont.isActive) cont.resume(Unit) }
                 })
-                if (t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id) != TextToSpeech.SUCCESS && cont.isActive) cont.resume(Unit)
+                if (t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id) != TextToSpeech.SUCCESS && cont.isActive) { failed = true; cont.resume(Unit) }
                 cont.invokeOnCancellation { try { t.stop() } catch (e: Exception) { } }
             }
         }
         delay(250)
+        return !failed
     }
 
-    private suspend fun playClip(b64: String, ext: String) {
-        if (b64.isBlank()) return
+    /** Plays the voice message. Returns null when it played, or a short reason when it did not. */
+    private suspend fun playClip(b64: String, ext: String): String? {
+        if (b64.isBlank()) return "the voice message arrived empty"
+        var problem: String? = null
         val f = File(cacheDir, "relay_clip.${ext.filter { it.isLetterOrDigit() }.ifBlank { "m4a" }}")
         try {
             f.writeBytes(Base64.decode(b64, Base64.NO_WRAP))
             withTimeoutOrNull(120_000) {
                 suspendCancellableCoroutine<Unit> { cont ->
                     val mp = MediaPlayer()
-                    fun done() { try { mp.release() } catch (e: Exception) { }; if (cont.isActive) cont.resume(Unit) }
+                    fun done(why: String? = null) {
+                        if (why != null) problem = why
+                        try { mp.release() } catch (e: Exception) { }
+                        if (cont.isActive) cont.resume(Unit)
+                    }
                     try {
                         mp.setAudioAttributes(
                             AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
                         )
-                        mp.setDataSource(f.path)
+                        java.io.FileInputStream(f).use { mp.setDataSource(it.fd) }
                         mp.setOnCompletionListener { done() }
-                        mp.setOnErrorListener { _, _, _ -> done(); true }
+                        mp.setOnErrorListener { _, what, extra -> done("the player failed (code $what/$extra)"); true }
                         mp.prepare()
                         mp.start()
                     } catch (e: Exception) {
-                        done()
+                        done("it could not be opened: ${e.localizedMessage}")
                     }
                     cont.invokeOnCancellation { try { mp.release() } catch (e: Exception) { } }
                 }
             }
         } catch (e: Exception) {
-            AssistantBridge.log("Could not play the voice message: ${e.localizedMessage}")
+            problem = "it could not be saved: ${e.localizedMessage}"
         } finally {
             try { f.delete() } catch (e: Exception) { }
         }
         delay(250)
+        return problem
+    }
+
+    private suspend fun info(text: String) {
+        AssistantBridge.log("Receiver: $text")
+        RelayClient.send("r2c", JSONObject().put("kind", "info").put("text", text))
     }
 
     // ---------------------------------------------------------------- listening
@@ -576,7 +593,10 @@ object RelayCall {
         RelayClient.delete("c2r")
         val listener = RelayClient.listen(scope, "r2c") { key, msg ->
             scope.launch { RelayClient.delete("r2c/$key") }
-            if (System.currentTimeMillis() - msg.optLong("ts") < 180_000) inbox.trySend(msg)
+            if (System.currentTimeMillis() - msg.optLong("ts") < 180_000) {
+                if (msg.optString("kind") == "info") AssistantBridge.callNote("App call: ${msg.optString("text")}")
+                else inbox.trySend(msg)
+            }
         }
         try {
             save("ANSWERING", "Calling…")
@@ -610,8 +630,23 @@ object RelayCall {
 
             val hello = task.greeting.trim()
             val text = task.message.trim()
-            val clip = task.attachmentUri?.let { File(it) }?.takeIf { it.exists() && it.length() in 1..3_000_000 }
-            val canTalk = task.converse && !AssistantBridge.offlineMode && AppSettings.apiKey.isNotBlank() && Net.isOnline(ctx)
+            val clipFile = task.attachmentUri?.let { File(it) }
+            val clip = clipFile?.takeIf { it.exists() && it.length() in 1..9_000_000 }
+            if (clipFile != null && clip == null) {
+                AssistantBridge.callNote(
+                    if (!clipFile.exists()) "App call: the voice message file is missing, so it was skipped."
+                    else "App call: the voice message is over 9 MB, so it was skipped. Use a shorter clip."
+                )
+            }
+            val whyNot = when {
+                !task.converse -> ""
+                AssistantBridge.offlineMode -> "Offline mode is on"
+                AppSettings.apiKey.isBlank() -> "no Gemini key is set on THIS phone (Setup > Google AI)"
+                !Net.isOnline(ctx) -> "this phone has no working internet"
+                else -> ""
+            }
+            val canTalk = task.converse && whyNot.isEmpty()
+            if (task.converse && !canTalk) AssistantBridge.callNote("App call: the assistant won't talk because $whyNot.")
 
             if (hello.isNotBlank()) {
                 lines.add("Assistant: $hello")
