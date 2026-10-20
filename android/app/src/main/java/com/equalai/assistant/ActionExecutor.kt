@@ -245,9 +245,46 @@ object ActionExecutor {
         }
     }
 
+    private const val WA_CALL_MIME = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
+
+    /** The Contacts row WhatsApp adds for "voice call" with this number, or null if the number has no WhatsApp contact. */
+    private fun whatsAppCallUri(context: Context, number: String): Uri? {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+        val tail = toE164Digits(number).takeLast(10)
+        return try {
+            context.contentResolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(ContactsContract.Data._ID),
+                "${ContactsContract.Data.MIMETYPE}=? AND ${ContactsContract.Data.DATA1} LIKE ?",
+                arrayOf(WA_CALL_MIME, "%$tail@s.whatsapp.net"),
+                null
+            )?.use { c ->
+                if (c.moveToFirst()) android.content.ContentUris.withAppendedId(ContactsContract.Data.CONTENT_URI, c.getLong(0)) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Scheduled call: place it, then speak the custom text as soon as the other person answers. */
     private fun callAndSpeakOnDevice(context: Context, task: ScheduledActionItem) {
-        OutgoingCall.arm(OutPlan(task, resolveContactNumber(context, task.target)))
+        val number = resolveContactNumber(context, task.target)
+        if (task.viaWhatsApp) {
+            val uri = whatsAppCallUri(context, number)
+            if (uri == null) {
+                AssistantBridge.callNote(
+                    "WhatsApp call not placed: $number isn't a saved contact with WhatsApp (or Contacts permission is off). " +
+                        "Save the number in Contacts first."
+                )
+                if (task.fallbackText.isNotBlank()) sendSms(context, task.target, task.fallbackText, task.simSlot)
+                return
+            }
+            launch(context, Intent(Intent.ACTION_VIEW).setDataAndType(uri, WA_CALL_MIME).setPackage("com.whatsapp"))
+            AssistantBridge.callNote("Calling $number on WhatsApp…")
+            CallAnswerer.startOutbound(context, OutPlan(task, number))
+            return
+        }
+        OutgoingCall.arm(OutPlan(task, number))
         makePhoneCall(context, task.target, task.simSlot)
     }
 
