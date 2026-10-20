@@ -59,6 +59,12 @@
                 android:value="Always-on background voice assistant" />
         </service>
 
+        <!-- Waits for app-to-app calls from another Equal phone and answers them -->
+        <service
+            android:name=".RelayReceiverService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
+
         <!-- Notification listener -->
         <service
             android:name=".EqualNotificationService"
