@@ -50,7 +50,8 @@ data class ScheduledActionItem(
     val retryGapSec: Int = 120,          // seconds before calling again (0 = right away)
     val fallbackText: String = "",       // sent by SMS when nobody answered after all attempts
     val greeting: String = "",           // CALL_SPEAK: said first, before the voice clip and the custom text
-    val viaWhatsApp: Boolean = false     // CALL_SPEAK: place a WhatsApp voice call instead of a phone call
+    val viaWhatsApp: Boolean = false,    // CALL_SPEAK: place a WhatsApp voice call instead of a phone call
+    val viaApp: Boolean = false          // CALL_SPEAK: call through the Equal app on their phone (Firebase relay)
 ) {
     val timeLabel: String
         get() = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(triggerAt))
@@ -69,6 +70,7 @@ data class ScheduledActionItem(
         .put("fb", fallbackText)
         .put("gr", greeting)
         .put("wa", viaWhatsApp)
+        .put("app", viaApp)
 
     companion object {
         fun fromJson(o: JSONObject) = ScheduledActionItem(
@@ -84,7 +86,8 @@ data class ScheduledActionItem(
             retryGapSec = if (o.has("gapS")) o.optInt("gapS", 120) else o.optInt("gap", 2) * 60,
             fallbackText = o.optString("fb", ""),
             greeting = o.optString("gr", ""),
-            viaWhatsApp = o.optBoolean("wa", false)
+            viaWhatsApp = o.optBoolean("wa", false),
+            viaApp = o.optBoolean("app", false)
         )
     }
 }
@@ -286,6 +289,20 @@ object AppSettings {
     var greeting: String
         get() = prefs.getString("greeting", "") ?: ""
         set(v) { prefs.edit().putString("greeting", v.trim()).apply() }
+
+    /** App-to-app calls: your Firebase Realtime Database link, and the shared pairing code both phones use. */
+    var relayUrl: String
+        get() = prefs.getString("relay_url", "") ?: ""
+        set(v) { prefs.edit().putString("relay_url", v.trim()).apply() }
+
+    var relayCode: String
+        get() = prefs.getString("relay_code", "") ?: ""
+        set(v) { prefs.edit().putString("relay_code", v.trim()).apply() }
+
+    /** This phone waits for app-to-app calls and answers them automatically. */
+    var receiverOn: Boolean
+        get() = prefs.getBoolean("receiver_on", false)
+        set(v) { prefs.edit().putBoolean("receiver_on", v).apply() }
 
     /** Custom text the assistant tells or asks every caller, on top of its normal questions. */
     var callerNote: String
