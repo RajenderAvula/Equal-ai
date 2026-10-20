@@ -23,7 +23,7 @@ object OutgoingCall {
     @Volatile private var armedAt = 0L
 
     private val timer = Regex("""^\s*\d{1,2}:\d{2}\s*$""")
-    private val dialerHints = listOf("incallui", "dialer", "telecom", "phone", "call")
+    private val dialerHints = listOf("incallui", "dialer", "telecom", "phone", "call", "whatsapp")
 
     fun arm(p: OutPlan) {
         plan = p
@@ -47,8 +47,18 @@ object OutgoingCall {
      * by CallAnswerer, so this never returns for a call that dropped. Returns true when the call timer was
      * actually seen, false when the answer is only assumed.
      */
-    suspend fun waitForAnswer(): Boolean {
+    suspend fun waitForAnswer(whatsApp: Boolean = false): Boolean {
         val a11y = AssistantBridge.accessibilityService
+        if (whatsApp) {
+            // WhatsApp gives no phone-state events, so only the on-screen timer proves it was answered
+            if (a11y == null) return false
+            val until = System.currentTimeMillis() + 50_000L
+            while (System.currentTimeMillis() < until) {
+                if (timerVisible(a11y.readAllWindows(maxChars = 4000, includePackages = true))) return true
+                delay(500)
+            }
+            return false
+        }
         if (a11y == null) {
             delay(AppSettings.outgoingWaitSec * 1000L)
             return false                                   // only assumed: the call log decides afterwards
@@ -59,6 +69,12 @@ object OutgoingCall {
             delay(500)
         }
         return false                                       // still connected but no timer seen: assumed
+    }
+
+    /** Presses End call in WhatsApp's call screen. */
+    fun endWhatsAppCall(): Boolean {
+        val a = AssistantBridge.accessibilityService ?: return false
+        return listOf("End call", "Hang up", "End").any { a.clickByText(it) }
     }
 
     /** Looks for 00:03-style text, but only inside the phone/dialer app (not the status-bar clock). */
