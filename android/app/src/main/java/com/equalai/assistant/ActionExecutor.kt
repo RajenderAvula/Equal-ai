@@ -268,6 +268,10 @@ object ActionExecutor {
 
     /** Scheduled call: place it, then speak the custom text as soon as the other person answers. */
     private fun callAndSpeakOnDevice(context: Context, task: ScheduledActionItem) {
+        if (task.viaApp) {
+            RelayCall.start(context, task)
+            return
+        }
         val number = resolveContactNumber(context, task.target)
         if (task.viaWhatsApp) {
             val uri = whatsAppCallUri(context, number)
