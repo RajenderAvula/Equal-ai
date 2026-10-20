@@ -49,7 +49,8 @@ data class ScheduledActionItem(
     val retries: Int = 0,                // CALL_SPEAK: extra attempts left when nobody answers
     val retryGapSec: Int = 120,          // seconds before calling again (0 = right away)
     val fallbackText: String = "",       // sent by SMS when nobody answered after all attempts
-    val greeting: String = ""            // CALL_SPEAK: said first, before the voice clip and the custom text
+    val greeting: String = "",           // CALL_SPEAK: said first, before the voice clip and the custom text
+    val viaWhatsApp: Boolean = false     // CALL_SPEAK: place a WhatsApp voice call instead of a phone call
 ) {
     val timeLabel: String
         get() = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(triggerAt))
@@ -67,6 +68,7 @@ data class ScheduledActionItem(
         .put("gapS", retryGapSec)
         .put("fb", fallbackText)
         .put("gr", greeting)
+        .put("wa", viaWhatsApp)
 
     companion object {
         fun fromJson(o: JSONObject) = ScheduledActionItem(
@@ -81,7 +83,8 @@ data class ScheduledActionItem(
             retries = o.optInt("retries", 0),
             retryGapSec = if (o.has("gapS")) o.optInt("gapS", 120) else o.optInt("gap", 2) * 60,
             fallbackText = o.optString("fb", ""),
-            greeting = o.optString("gr", "")
+            greeting = o.optString("gr", ""),
+            viaWhatsApp = o.optBoolean("wa", false)
         )
     }
 }
