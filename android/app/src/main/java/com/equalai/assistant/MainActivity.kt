@@ -91,6 +91,15 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         // The microphone service may only be started while the app is visible (Android 12+).
         startAssistantServiceIfPossible()
+        // phones that receive app-to-app calls: bring the receiver back after a restart or reboot
+        try {
+            AppSettings.init(this)
+            if (AppSettings.receiverOn && RelayClient.configured &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            ) ContextCompat.startForegroundService(this, Intent(this, RelayReceiverService::class.java))
+        } catch (e: Exception) {
+            AssistantBridge.log("Could not start the call receiver: ${e.localizedMessage}")
+        }
     }
 
     private fun startAssistantServiceIfPossible() {
@@ -430,6 +439,7 @@ fun SchedulerTab(context: Context) {
     var appLabel by remember { mutableStateOf("") }
     var converse by remember { mutableStateOf(true) }
     var viaWa by remember { mutableStateOf(false) }
+    var viaApp by remember { mutableStateOf(false) }
     var retries by remember { mutableStateOf(0f) }
     var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
@@ -635,7 +645,15 @@ fun SchedulerTab(context: Context) {
                 }) { Text("Preview the custom text (voice and speed)") }
                 if (textPreview.isNotBlank()) Text(textPreview, fontSize = 11.sp, color = Color.Gray)
             }
-            LabeledSwitch("Make it a WhatsApp voice call (not a phone call)", viaWa) { viaWa = it }
+            LabeledSwitch("Call through the Equal app on their phone", viaApp) { viaApp = it; if (it) viaWa = false }
+            if (viaApp) Text(
+                "Their phone needs Equal installed with \"This phone receives calls\" switched on (Setup tab), the same " +
+                    "database link and pairing code as this phone. Their phone rings, speaks, listens and replies through " +
+                    "the internet; nothing goes through the phone network. The contact above is only a label (and the number " +
+                    "for the fallback text).",
+                fontSize = 11.sp, color = Color.Gray
+            )
+            if (!viaApp) LabeledSwitch("Make it a WhatsApp voice call (not a phone call)", viaWa) { viaWa = it }
             if (viaWa) Text(
                 "Needs the number saved in Contacts with WhatsApp, the Equal AI accessibility service on, and the phone " +
                     "unlocked at call time. The voice plays on the speaker, which WhatsApp's own echo canceller usually leaves alone.",
@@ -773,7 +791,8 @@ fun SchedulerTab(context: Context) {
                                     triggerAt = triggerAt,
                                     attachmentUri = clipPath,
                                     converse = converse,
-                                    viaWhatsApp = isCall && viaWa,
+                                    viaWhatsApp = isCall && viaWa && !viaApp,
+                                    viaApp = isCall && viaApp,
                                     simSlot = simSlot,
                                     retries = if (isCall) retries.toInt() else 0,
                                     retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
@@ -812,6 +831,7 @@ fun SchedulerTab(context: Context) {
                             val extras = buildList {
                                 if (task.attachmentUri != null) add("voice clip")
                                 if (task.viaWhatsApp) add("WhatsApp call")
+                                if (task.viaApp) add("app call")
                                 if (task.converse) add("assistant talks")
                                 if (task.retries > 0) add("${task.retries} retries")
                                 if (task.fallbackText.isNotBlank()) add("fallback text")
@@ -1071,6 +1091,10 @@ fun SetupTab(context: Context) {
     var speed by remember { mutableStateOf(AppSettings.speechRate) }
     var level by remember { mutableStateOf(AppSettings.callVoiceLevel) }
     var loopOn by remember { mutableStateOf(AppSettings.headsetLoop) }
+    var relayUrl by remember { mutableStateOf(AppSettings.relayUrl) }
+    var relayCode by remember { mutableStateOf(AppSettings.relayCode) }
+    var receiverOn by remember { mutableStateOf(AppSettings.receiverOn) }
+    var relayStatus by remember { mutableStateOf("") }
     var jackStatus by remember { mutableStateOf("checking…") }
     LaunchedEffect(Unit) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -1286,6 +1310,72 @@ fun SetupTab(context: Context) {
             }) { Text("Test Gemini") }
         }
         if (modelStatus.isNotBlank()) Text(modelStatus, fontSize = 12.sp, color = Green)
+
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        Text("App-to-app calls (free, no phone network)", fontWeight = FontWeight.Bold)
+        Text(
+            "Both phones run Equal and share a free Firebase Realtime Database that you create once. Your phone's " +
+                "scheduled \"call through the Equal app\" rings the other phone, which speaks the message in its own voice, " +
+                "listens, and sends the answer back for Gemini to reply to.\n" +
+                "1) console.firebase.google.com: create a project, then Build > Realtime Database > Create database " +
+                "(test mode is fine). 2) Copy the database link (https://…firebaseio.com or …firebasedatabase.app) below. " +
+                "3) Open the Rules tab, press \"Copy rules\" here, paste, Publish. 4) Use the same link and pairing code on " +
+                "both phones.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        OutlinedTextField(
+            value = relayUrl,
+            onValueChange = { relayUrl = it; AppSettings.relayUrl = it },
+            label = { Text("Firebase database link") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = relayCode,
+            onValueChange = { relayCode = it; AppSettings.relayCode = it },
+            label = { Text("Pairing code (12+ characters, same on both phones)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { relayCode = RelayClient.randomCode(); AppSettings.relayCode = relayCode }) { Text("New code") }
+            OutlinedButton(onClick = {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                    "rules",
+                    "{\"rules\":{\"rooms\":{\"\$code\":{\".read\":\"\$code.length >= 12\",\".write\":\"\$code.length >= 12\"}}}}"
+                ))
+                Toast.makeText(context, "Rules copied. Paste them in Firebase > Realtime Database > Rules.", Toast.LENGTH_LONG).show()
+            }) { Text("Copy rules") }
+            OutlinedButton(onClick = {
+                scope.launch { relayStatus = "Testing…"; relayStatus = RelayClient.test() }
+            }) { Text("Test") }
+        }
+        if (relayStatus.isNotBlank()) Text(relayStatus, fontSize = 12.sp, color = if (relayStatus == "Connected.") Green else Color.Gray)
+        LabeledSwitch("This phone receives calls from Equal", receiverOn) { on ->
+            receiverOn = on
+            AppSettings.receiverOn = on
+            try {
+                if (on) {
+                    if (!RelayClient.configured) {
+                        Toast.makeText(context, "Fill in the database link and a pairing code first.", Toast.LENGTH_LONG).show()
+                        receiverOn = false
+                        AppSettings.receiverOn = false
+                    } else ContextCompat.startForegroundService(context, Intent(context, RelayReceiverService::class.java))
+                } else context.stopService(Intent(context, RelayReceiverService::class.java))
+            } catch (e: Exception) {
+                relayStatus = "Could not start: ${e.localizedMessage}"
+            }
+        }
+        Text(
+            "Switch this on only on the phone that gets called. It stays on in the background (a small notification shows). " +
+                "For reliable ringing, also set Equal to \"Unrestricted\" battery use, and open Equal once after every " +
+                "restart of that phone.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        OutlinedButton(onClick = {
+            try { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (e: Exception) { }
+        }) { Text("Open battery settings") }
 
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
         Text("3. Calls", fontWeight = FontWeight.Bold)
