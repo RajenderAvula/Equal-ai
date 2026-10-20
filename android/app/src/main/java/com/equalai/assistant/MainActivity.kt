@@ -429,6 +429,7 @@ fun SchedulerTab(context: Context) {
     var attachmentUriString by remember { mutableStateOf<String?>(null) }
     var appLabel by remember { mutableStateOf("") }
     var converse by remember { mutableStateOf(true) }
+    var viaWa by remember { mutableStateOf(false) }
     var retries by remember { mutableStateOf(0f) }
     var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
@@ -634,6 +635,12 @@ fun SchedulerTab(context: Context) {
                 }) { Text("Preview the custom text (voice and speed)") }
                 if (textPreview.isNotBlank()) Text(textPreview, fontSize = 11.sp, color = Color.Gray)
             }
+            LabeledSwitch("Make it a WhatsApp voice call (not a phone call)", viaWa) { viaWa = it }
+            if (viaWa) Text(
+                "Needs the number saved in Contacts with WhatsApp, the Equal AI accessibility service on, and the phone " +
+                    "unlocked at call time. The voice plays on the speaker, which WhatsApp's own echo canceller usually leaves alone.",
+                fontSize = 11.sp, color = Color.Gray
+            )
             LabeledSwitch("Assistant talks with them afterwards", converse) { converse = it }
 
             Text("If not answered, call again ${retries.toInt()} time(s)", fontSize = 13.sp)
@@ -766,6 +773,7 @@ fun SchedulerTab(context: Context) {
                                     triggerAt = triggerAt,
                                     attachmentUri = clipPath,
                                     converse = converse,
+                                    viaWhatsApp = isCall && viaWa,
                                     simSlot = simSlot,
                                     retries = if (isCall) retries.toInt() else 0,
                                     retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
@@ -803,6 +811,7 @@ fun SchedulerTab(context: Context) {
                         if (task.actionType == "CALL_SPEAK") {
                             val extras = buildList {
                                 if (task.attachmentUri != null) add("voice clip")
+                                if (task.viaWhatsApp) add("WhatsApp call")
                                 if (task.converse) add("assistant talks")
                                 if (task.retries > 0) add("${task.retries} retries")
                                 if (task.fallbackText.isNotBlank()) add("fallback text")
