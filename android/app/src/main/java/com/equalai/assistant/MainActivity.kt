@@ -985,6 +985,16 @@ fun CallsTab(context: Context) {
             "Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray,
             maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
         )
+        if (RelayCall.active || RelayReceiverService.live) {
+            Button(
+                onClick = {
+                    if (RelayCall.active) RelayCall.cancel()
+                    if (RelayReceiverService.live) RelayReceiverService.hangUp(context)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB91C1C)),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (RelayCall.active) "Cancel the app call" else "Hang up") }
+        }
 
         TextButton(onClick = { showSettings = !showSettings }, modifier = Modifier.fillMaxWidth()) {
             Text(if (showSettings) "Hide call messages ▲" else "Call messages and recordings ▼")
