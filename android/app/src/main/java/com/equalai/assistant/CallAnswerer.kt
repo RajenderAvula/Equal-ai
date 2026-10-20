@@ -337,7 +337,9 @@ object CallAnswerer {
         CallVoice.init(ctx)
         if (svc != null) withContext(Dispatchers.Main) { svc.enterCallMode() }
 
+        val wa = task.viaWhatsApp
         val route = CallAudioRoute(ctx)
+        route.forceSpeaker = wa
         s.route = route
         route.enable()
 
@@ -349,7 +351,19 @@ object CallAnswerer {
         s.callerName = ActionExecutor.resolveCallerName(ctx, s.number)
         CallStore.upsert(ctx, snapshot(s, "ANSWERING", "Calling…"))
 
-        val sawTimer = OutgoingCall.waitForAnswer()        // cancelled here if the call drops unanswered
+        val sawTimer = OutgoingCall.waitForAnswer(wa)        // cellular: cancelled here if the call drops unanswered
+        if (wa && !sawTimer) {
+            OutgoingCall.endWhatsAppCall()
+            AssistantBridge.callNote(
+                if (AssistantBridge.accessibilityService == null) "WhatsApp call: turn on the Equal AI accessibility service so Equal can see when it is answered."
+                else "WhatsApp call not answered."
+            )
+            s.answered = false
+            delay(1_000)
+            rec.stop()
+            endSession(ctx, s)
+            return
+        }
         s.answered = true
         s.assumed = !sawTimer
         AssistantBridge.callNote(if (sawTimer) "Scheduled call answered." else "Scheduled call: speaking now (answer assumed).")
@@ -413,9 +427,10 @@ object CallAnswerer {
             if (!closed) sayInto(rec, "Thank you. Goodbye.")
         }
         delay(2_000)
-        hangUp(ctx)
+        if (wa) OutgoingCall.endWhatsAppCall() else hangUp(ctx)
         delay(1_500)
         rec.stop()
+        if (wa) endSession(ctx, s)                           // WhatsApp gives no "call ended" event
     }
 
     /** Speaks into the call; if the microphone looks silent afterwards, tries another audio source. */
