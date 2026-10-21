@@ -52,6 +52,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -309,6 +310,15 @@ class RelayReceiverService : Service() {
         internal fun newDecision(): CompletableDeferred<Boolean> = CompletableDeferred<Boolean>().also { decision = it }
         internal fun clearDecision() { decision = null }
 
+        /** Keeps the service in the foreground for a live call even when this phone's receiver switch is off. */
+        fun keepAlive(ctx: Context) {
+            try { ContextCompat.startForegroundService(ctx, Intent(ctx, RelayReceiverService::class.java).putExtra("live", true)) } catch (e: Exception) { }
+        }
+
+        fun releaseKeepAlive(ctx: Context) {
+            if (!AppSettings.receiverOn) try { ctx.stopService(Intent(ctx, RelayReceiverService::class.java)) } catch (e: Exception) { }
+        }
+
         fun hangUp(ctx: Context) {
             try { ctx.startService(Intent(ctx, RelayReceiverService::class.java).setAction(ACTION_HANGUP)) } catch (e: Exception) { }
         }
@@ -344,12 +354,15 @@ class RelayReceiverService : Service() {
         if (intent?.action == ACTION_ACCEPT) { decide(true); return START_STICKY }
         if (intent?.action == ACTION_DECLINE) { decide(false); return START_STICKY }
         if (intent?.action == ACTION_HANGUP) {
+            if (LiveCall.active) { LiveCall.hangUp(); return START_STICKY }
             scope.launch {
                 abortCurrent()
                 RelayClient.send(me, "r2c", JSONObject().put("kind", "hangup"))
             }
             return START_STICKY
         }
+        val keep = intent?.getBooleanExtra("live", false) == true
+        if (keep && !AppSettings.receiverOn) return START_NOT_STICKY       // held in the foreground for one live call only
         if (!AppSettings.receiverOn || !RelayClient.configured) {
             stopSelf()
             return START_NOT_STICKY
@@ -436,7 +449,10 @@ class RelayReceiverService : Service() {
         if (msg.optString("kind") == "ring") ignoreUntil = 0L
         lastActivity = System.currentTimeMillis()
         when (msg.optString("kind")) {
-            "ring" -> beginCall(from = msg.optString("from"))
+            "ring" -> if (msg.optString("mode") == "live") beginLive(msg.optString("from")) else beginCall(from = msg.optString("from"))
+            "offer" -> LiveCall.onOffer(msg.optString("sdp"))
+            "ice" -> LiveCall.onIce(msg)
+            "bye" -> LiveCall.onBye()
             "say" -> {
                 if (!inCall) beginCall(silent = true)
                 val lang = msg.optString("lang")
@@ -458,6 +474,23 @@ class RelayReceiverService : Service() {
             }
         }
         lastActivity = System.currentTimeMillis()
+    }
+
+    /** A live (two-way voice) call: ring full-screen, and on Attend hand over to LiveCall. */
+    private suspend fun beginLive(from: String) {
+        if (LiveCall.active || inCall) {
+            RelayClient.send(me, "r2c", JSONObject().put("kind", "ack"))
+            RelayClient.send(me, "r2c", JSONObject().put("kind", "declined"))        // busy
+            return
+        }
+        RelayClient.send(me, "r2c", JSONObject().put("kind", "ack"))
+        val answer = waitForAttend(if (from.isBlank()) "Live call" else "$from · live call")
+        if (answer != 1) {
+            RelayClient.send(me, "r2c", JSONObject().put("kind", if (answer == 0) "declined" else "missed"))
+            return
+        }
+        RelayClient.send(me, "r2c", JSONObject().put("kind", "attend"))
+        LiveCall.beginIncoming(applicationContext, me, from)
     }
 
     private suspend fun beginCall(silent: Boolean = false, from: String = "") {
