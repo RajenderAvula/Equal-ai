@@ -512,8 +512,20 @@ object CallAnswerer {
                 "$owner can't take your call right now. " + (if (note.isNotBlank()) "$note " else "") +
                 "May I have your name and the reason for calling?"
         }
-        s.lines.add("Assistant: $greeting")
-        say(greeting)
+        val callerClip = AppSettings.callerClipFor(s.number)
+        if (callerClip != null) {
+            // a voice message you recorded replaces the spoken greeting, then the usual question follows
+            s.lines.add("Assistant: [pre-recorded voice message]")
+            CallVoice.playClip(callerClip)?.let { AssistantBridge.callNote(it) }
+            delay(400)
+            val ask = if (s.degraded) "Please leave your name, number and message after the beep."
+                else "May I have your name and the reason for calling?"
+            s.lines.add("Assistant: $ask")
+            say(ask)
+        } else {
+            s.lines.add("Assistant: $greeting")
+            say(greeting)
+        }
 
         var closed = false
         if (s.degraded) {
