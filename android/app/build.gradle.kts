@@ -49,4 +49,5 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+implementation("io.getstream:stream-webrtc-android:1.1.1")
 }
