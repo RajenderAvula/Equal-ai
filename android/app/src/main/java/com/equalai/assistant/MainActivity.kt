@@ -25,6 +25,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
@@ -440,6 +441,12 @@ fun SchedulerTab(context: Context) {
     var converse by remember { mutableStateOf(true) }
     var viaWa by remember { mutableStateOf(false) }
     var viaApp by remember { mutableStateOf(false) }
+    val recipients = remember { mutableStateListOf<String>() }
+    var foundPhones by remember { mutableStateOf<List<Pair<String, Long>>>(emptyList()) }
+    var phonesStatus by remember { mutableStateOf("") }
+    val extraDays = remember { mutableStateListOf<Long>() }
+    val timesOfDay = remember { mutableStateListOf<Int>() }          // minutes after midnight; empty = just the time picked above
+    var repeatDays by remember { mutableStateOf(0f) }
     var retries by remember { mutableStateOf(0f) }
     var gapSec by remember { mutableStateOf("120") }
     var fallback by remember { mutableStateOf("") }
@@ -653,6 +660,32 @@ fun SchedulerTab(context: Context) {
                     "for the fallback text).",
                 fontSize = 11.sp, color = Color.Gray
             )
+            if (viaApp) {
+                Text("Phones to call (you can pick several; each gets its own conversation)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedButton(onClick = {
+                    sched.launch {
+                        phonesStatus = "Looking…"
+                        val l = RelayClient.listPhones()
+                        if (l == null) phonesStatus = "Could not reach the database. Check Setup > App-to-app calls."
+                        else {
+                            foundPhones = l
+                            phonesStatus = if (l.isEmpty()) "No phone has switched its receiver on yet." else ""
+                        }
+                    }
+                }) { Text("Find phones") }
+                if (phonesStatus.isNotBlank()) Text(phonesStatus, fontSize = 11.sp, color = Color.Gray)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    foundPhones.forEach { (name, age) ->
+                        val on = recipients.contains(name)
+                        FilterChip(
+                            selected = on,
+                            onClick = { if (on) recipients.remove(name) else recipients.add(name) },
+                            label = { Text(name + if (age < 150) " · online" else if (age == Long.MAX_VALUE) "" else " · ${age / 60} min ago") }
+                        )
+                    }
+                }
+                if (recipients.isNotEmpty()) Text("Will call: ${recipients.joinToString(", ")}", fontSize = 12.sp, color = Green)
+            }
             if (!viaApp) LabeledSwitch("Make it a WhatsApp voice call (not a phone call)", viaWa) { viaWa = it }
             if (viaWa) Text(
                 "Needs the number saved in Contacts with WhatsApp, the Equal AI accessibility service on, and the phone " +
@@ -761,38 +794,124 @@ fun SchedulerTab(context: Context) {
             fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Green
         )
 
+        Text("Times each day (optional: if none is chosen, the time picked above is used)", fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+            listOf(8 * 60 to "8:00 AM", 12 * 60 to "12:00 PM", 19 * 60 to "7:00 PM").forEach { (m, label) ->
+                val on = timesOfDay.contains(m)
+                FilterChip(selected = on, onClick = { if (on) timesOfDay.remove(m) else { timesOfDay.add(m); timesOfDay.sort() } }, label = { Text(label) })
+            }
+            timesOfDay.filter { it !in listOf(8 * 60, 12 * 60, 19 * 60) }.forEach { m ->
+                FilterChip(
+                    selected = true,
+                    onClick = { timesOfDay.remove(m) },
+                    label = { Text(String.format(Locale.getDefault(), "%d:%02d %s", if (m / 60 % 12 == 0) 12 else m / 60 % 12, m % 60, if (m / 60 < 12) "AM" else "PM") + "  ✕") }
+                )
+            }
+        }
+        OutlinedButton(
+            onClick = {
+                TimePickerDialog(context, { _, h, min ->
+                    val m = h * 60 + min
+                    if (!timesOfDay.contains(m)) { timesOfDay.add(m); timesOfDay.sort() }
+                }, 9, 0, false).show()
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.AccessTime, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Add a custom time each day")
+        }
+        OutlinedButton(
+            onClick = {
+                val cal = Calendar.getInstance().apply { timeInMillis = triggerAt }
+                DatePickerDialog(context, { _, y, m, d ->
+                    val c = Calendar.getInstance().apply {
+                        timeInMillis = triggerAt
+                        set(Calendar.YEAR, y); set(Calendar.MONTH, m); set(Calendar.DAY_OF_MONTH, d)
+                    }
+                    if (c.timeInMillis != triggerAt && !extraDays.contains(c.timeInMillis)) extraDays.add(c.timeInMillis)
+                    extraDays.sort()
+                }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Also on another day")
+        }
+        if (extraDays.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                extraDays.toList().forEach { t ->
+                    FilterChip(
+                        selected = true,
+                        onClick = { extraDays.remove(t) },
+                        label = { Text(SimpleDateFormat("dd MMM", Locale.getDefault()).format(t) + "  ✕") }
+                    )
+                }
+            }
+        }
+        Text("Or repeat every day for ${repeatDays.toInt()} more day(s) after the chosen date", fontSize = 13.sp)
+        Slider(value = repeatDays, onValueChange = { repeatDays = it }, valueRange = 0f..30f, steps = 29)
+
         Button(
             onClick = {
+                val appCall = actionType == "CALL_SPEAK" && viaApp
                 when {
-                    target.isBlank() ->
+                    appCall && recipients.isEmpty() ->
+                        Toast.makeText(context, "Tap Find phones and choose who to call", Toast.LENGTH_SHORT).show()
+                    !appCall && target.isBlank() ->
                         Toast.makeText(context, if (actionType == "OPEN_APP") "Choose an app" else "Enter a contact", Toast.LENGTH_SHORT).show()
                     actionType != "OPEN_APP" && message.isBlank() && attachmentUriString == null ->
                         Toast.makeText(context, "Enter a message", Toast.LENGTH_SHORT).show()
-                    triggerAt <= System.currentTimeMillis() + 5_000L ->
+                    triggerAt <= System.currentTimeMillis() + 5_000L && extraDays.isEmpty() && repeatDays.toInt() == 0 && timesOfDay.isEmpty() ->
                         Toast.makeText(context, "Pick a time in the future", Toast.LENGTH_SHORT).show()
                     else -> {
-                        val id = newTaskId()
-                        val clipPath = when (actionType) {
-                            "WHATSAPP" -> attachmentUriString
-                            "CALL_SPEAK" -> attachmentUriString?.let { copyClip(context, Uri.parse(it), id) }
-                            else -> null
+                        // every moment this task should run: the chosen time, the extra days, and the daily repeats
+                        val baseCal = Calendar.getInstance().apply { timeInMillis = triggerAt }
+                        val days = LinkedHashSet<Long>()
+                        fun dayStart(ms: Long) = Calendar.getInstance().apply {
+                            timeInMillis = ms
+                            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                        }.timeInMillis
+                        days.add(dayStart(triggerAt))
+                        extraDays.forEach { days.add(dayStart(it)) }
+                        for (n in 1..repeatDays.toInt()) {
+                            days.add(dayStart(Calendar.getInstance().apply { timeInMillis = triggerAt; add(Calendar.DAY_OF_MONTH, n) }.timeInMillis))
                         }
-                        if (actionType == "CALL_SPEAK" && attachmentUriString != null && clipPath == null) {
-                            Toast.makeText(context, "Could not read that voice clip", Toast.LENGTH_SHORT).show()
-                        } else {
-                            val isCall = actionType == "CALL_SPEAK"
+                        val minutes = if (timesOfDay.isEmpty()) listOf(baseCal.get(Calendar.HOUR_OF_DAY) * 60 + baseCal.get(Calendar.MINUTE))
+                                      else timesOfDay.toList()
+                        val times = LinkedHashSet<Long>()
+                        for (d in days) for (mm in minutes) {
+                            times.add(Calendar.getInstance().apply {
+                                timeInMillis = d
+                                set(Calendar.HOUR_OF_DAY, mm / 60); set(Calendar.MINUTE, mm % 60)
+                            }.timeInMillis)
+                        }
+                        val future = times.filter { it > System.currentTimeMillis() + 5_000L }.sorted()
+                        val isCall = actionType == "CALL_SPEAK"
+                        var failed = false
+                        var made = 0
+                        for (at in future) {
+                            val id = newTaskId()
+                            val clipPath = when (actionType) {
+                                "WHATSAPP" -> attachmentUriString
+                                "CALL_SPEAK" -> attachmentUriString?.let { copyClip(context, Uri.parse(it), id) }
+                                else -> null
+                            }
+                            if (actionType == "CALL_SPEAK" && attachmentUriString != null && clipPath == null) { failed = true; break }
                             Scheduler.add(
                                 context,
                                 ScheduledActionItem(
                                     id = id,
                                     actionType = actionType,
-                                    target = target.trim(),
+                                    target = if (isCall && viaApp && target.isBlank()) recipients.joinToString(", ") else target.trim(),
                                     message = if (actionType == "OPEN_APP") appLabel else message,
-                                    triggerAt = triggerAt,
+                                    triggerAt = at,
                                     attachmentUri = clipPath,
                                     converse = converse,
                                     viaWhatsApp = isCall && viaWa && !viaApp,
                                     viaApp = isCall && viaApp,
+                                    recipients = if (isCall && viaApp) recipients.joinToString(",") else "",
                                     simSlot = simSlot,
                                     retries = if (isCall) retries.toInt() else 0,
                                     retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
@@ -800,8 +919,18 @@ fun SchedulerTab(context: Context) {
                                     greeting = if (isCall) greet.trim() else ""
                                 )
                             )
+                            made++
+                        }
+                        if (failed) {
+                            Toast.makeText(context, "Could not read that voice clip", Toast.LENGTH_SHORT).show()
+                        } else {
                             target = ""; message = ""; attachmentUriString = null; appLabel = ""; fallback = ""; greet = ""
-                            Toast.makeText(context, "Scheduled", Toast.LENGTH_SHORT).show()
+                            extraDays.clear(); repeatDays = 0f; timesOfDay.clear()
+                            Toast.makeText(
+                                context,
+                                if (made == 0) "Those times are all in the past" else if (made > 1) "Scheduled $made times" else "Scheduled",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         }
                     }
                 }
@@ -831,7 +960,7 @@ fun SchedulerTab(context: Context) {
                             val extras = buildList {
                                 if (task.attachmentUri != null) add("voice clip")
                                 if (task.viaWhatsApp) add("WhatsApp call")
-                                if (task.viaApp) add("app call")
+                                if (task.viaApp) add("app call: ${task.recipients}")
                                 if (task.converse) add("assistant talks")
                                 if (task.retries > 0) add("${task.retries} retries")
                                 if (task.fallbackText.isNotBlank()) add("fallback text")
@@ -925,6 +1054,27 @@ fun CallsTab(context: Context) {
     var showSettings by remember { mutableStateOf(false) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var clipTick by remember { mutableStateOf(0) }
+    var clipNumber by remember { mutableStateOf("") }
+    var clipFor by remember { mutableStateOf("") }                 // "" = the default message, otherwise the number being set
+    val clipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val dir = File(context.filesDir, "clips").apply { mkdirs() }
+                val key = if (clipFor.isBlank()) "default" else clipFor.filter { it.isDigit() }.takeLast(10)
+                val out = File(dir, "caller_$key.audio")
+                context.contentResolver.openInputStream(uri)?.use { i -> out.outputStream().use { o -> i.copyTo(o) } }
+                if (out.length() > 0) {
+                    if (clipFor.isBlank()) AppSettings.callerClipDefault = out.absolutePath
+                    else AppSettings.setCallerClip(clipFor, out.absolutePath)
+                    clipTick++
+                    Toast.makeText(context, "Voice message saved", Toast.LENGTH_SHORT).show()
+                } else Toast.makeText(context, "Could not read that audio file", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Could not read that audio file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             scope.launch {
@@ -1017,6 +1167,48 @@ fun CallsTab(context: Context) {
             modifier = Modifier.fillMaxWidth()
         )
 
+        Text("Voice message for callers", fontWeight = FontWeight.SemiBold)
+        Text(
+            "When auto-answer picks up a normal call, this recording is played first instead of the spoken greeting, " +
+                "then Equal asks its usual question. Set one for everybody, and different ones for chosen numbers. They " +
+                "stay until you change or remove them. Whether the caller can hear it depends on your phone (see Setup); " +
+                "the phone's own call recorder is what records both voices. Firebase doesn't affect normal calls.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        key(clipTick) {
+            val def = AppSettings.callerClipDefault
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { clipFor = ""; clipPicker.launch(arrayOf("audio/*")) }) {
+                    Text(if (def.isBlank()) "Choose default message" else "Change default message")
+                }
+                if (def.isNotBlank()) TextButton(onClick = { AppSettings.callerClipDefault = ""; clipTick++ }) { Text("Remove") }
+            }
+            AppSettings.callerClipEntries().forEach { (num, _) ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text("…$num has its own message", modifier = Modifier.weight(1f), fontSize = 13.sp)
+                    TextButton(onClick = { AppSettings.setCallerClip(num, null); clipTick++ }) { Text("Remove") }
+                }
+            }
+        }
+        OutlinedTextField(
+            value = clipNumber,
+            onValueChange = { clipNumber = it },
+            label = { Text("Phone number for its own message") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(
+            onClick = {
+                if (clipNumber.filter { it.isDigit() }.length < 5) {
+                    Toast.makeText(context, "Enter the phone number first", Toast.LENGTH_SHORT).show()
+                } else {
+                    clipFor = clipNumber
+                    clipPicker.launch(arrayOf("audio/*"))
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Choose a message for this number") }
+
         OutlinedButton(
             onClick = { importPicker.launch(arrayOf("audio/*")) },
             modifier = Modifier.fillMaxWidth()
@@ -1104,6 +1296,7 @@ fun SetupTab(context: Context) {
     var relayUrl by remember { mutableStateOf(AppSettings.relayUrl) }
     var relayCode by remember { mutableStateOf(AppSettings.relayCode) }
     var receiverOn by remember { mutableStateOf(AppSettings.receiverOn) }
+    var receiverName by remember { mutableStateOf(AppSettings.receiverName) }
     var relayStatus by remember { mutableStateOf("") }
     var jackStatus by remember { mutableStateOf("checking…") }
     LaunchedEffect(Unit) {
@@ -1362,6 +1555,14 @@ fun SetupTab(context: Context) {
             }) { Text("Test") }
         }
         if (relayStatus.isNotBlank()) Text(relayStatus, fontSize = 12.sp, color = if (relayStatus == "Connected.") Green else Color.Gray)
+        OutlinedTextField(
+            value = receiverName,
+            onValueChange = { receiverName = it; AppSettings.receiverName = it },
+            label = { Text("This phone's name (shown when choosing who to call)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text("Give every receiving phone a different name, for example mom, dad, grandma. Letters and digits only.", fontSize = 12.sp, color = Color.Gray)
         LabeledSwitch("This phone receives calls from Equal", receiverOn) { on ->
             receiverOn = on
             AppSettings.receiverOn = on
