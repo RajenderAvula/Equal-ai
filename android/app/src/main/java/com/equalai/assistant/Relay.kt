@@ -14,11 +14,36 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.Ringtone
 import android.media.RingtoneManager
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
@@ -91,41 +116,54 @@ object RelayClient {
     }
 
     /** Adds a message to a mailbox ("c2r" = caller to receiver, "r2c" = receiver to caller). */
-    suspend fun send(box: String, msg: JSONObject): Boolean = withContext(Dispatchers.IO) {
+    suspend fun send(peer: String, box: String, msg: JSONObject): Boolean = withContext(Dispatchers.IO) {
         try {
             msg.put("ts", System.currentTimeMillis())
             val id = System.currentTimeMillis().toString() + "_" + (1000..9999).random()
-            request("PUT", "$box/$id", msg.toString()).first in 200..299
+            request("PUT", "phones/$peer/$box/$id", msg.toString()).first in 200..299
         } catch (e: Exception) {
             AssistantBridge.log("Relay send failed: ${e.localizedMessage}")
             false
         }
     }
 
-    suspend fun delete(path: String) = withContext(Dispatchers.IO) {
-        try { request("DELETE", path, null) } catch (e: Exception) { }
+    suspend fun delete(peer: String, path: String) = withContext(Dispatchers.IO) {
+        try { request("DELETE", "phones/$peer/$path", null) } catch (e: Exception) { }
         Unit
     }
 
-    /** Receiver heartbeat: the receiving phone writes the time here every minute. */
-    suspend fun heartbeat() = withContext(Dispatchers.IO) {
-        try { request("PUT", "alive", JSONObject().put("ts", System.currentTimeMillis()).toString()) } catch (e: Exception) { }
+    /** Receiver heartbeat: each receiving phone writes the time here every minute, under its own name. */
+    suspend fun heartbeat(peer: String) = withContext(Dispatchers.IO) {
+        try { request("PUT", "phones/$peer/alive", JSONObject().put("ts", System.currentTimeMillis()).toString()) } catch (e: Exception) { }
         Unit
     }
 
-    /** Seconds since the receiving phone last checked in, or null if it never has / can't be read. */
-    suspend fun receiverAgeSec(): Long? = withContext(Dispatchers.IO) {
-        try {
-            val (code, text) = request("GET", "alive", null)
-            if (code !in 200..299 || text.isBlank() || text == "null") null
-            else (System.currentTimeMillis() - JSONObject(text).optLong("ts")) / 1000
-        } catch (e: Exception) { null }
-    }
+    /** Every receiving phone that has checked in under this pairing code: name to seconds since its last check-in. */
+    suspend fun listPhones(): List<Pair<String, Long>>? = withContext(Dispatchers.IO) { listPhonesBlocking() }
 
-    fun ageLabel(sec: Long?): String = when {
-        sec == null -> "The receiving phone has never checked in (Equal isn't running there, or its receiver switch is off)."
-        sec < 150 -> "The receiving phone is online (checked in ${sec}s ago)."
-        else -> "The receiving phone last checked in ${sec / 60} min ago, so its receiver has probably been stopped. " +
+    private fun listPhonesBlocking(): List<Pair<String, Long>>? = try {
+        val (code, text) = request("GET", "phones", null)
+        if (code !in 200..299) null
+        else if (text.isBlank() || text == "null") emptyList()
+        else {
+            val o = JSONObject(text)
+            val out = ArrayList<Pair<String, Long>>()
+            val keys = o.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val ts = o.optJSONObject(k)?.optJSONObject("alive")?.optLong("ts") ?: 0L
+                out.add(k to (if (ts > 0) (System.currentTimeMillis() - ts) / 1000 else Long.MAX_VALUE))
+            }
+            out.sortedBy { it.first }
+        }
+    } catch (e: Exception) { null }
+
+    suspend fun receiverAgeSec(peer: String): Long? = listPhones()?.firstOrNull { it.first == peer }?.second?.takeIf { it != Long.MAX_VALUE }
+
+    fun ageLabel(name: String, sec: Long?): String = when {
+        sec == null -> "$name has never checked in (Equal isn't running there, the receiver switch is off, or the name differs)."
+        sec < 150 -> "$name is online (checked in ${sec}s ago)."
+        else -> "$name last checked in ${sec / 60} min ago, so its receiver has probably been stopped. " +
             "Open Equal on that phone, and set its battery use to Unrestricted."
     }
 
@@ -137,7 +175,11 @@ object RelayClient {
             when {
                 code in 200..299 -> {
                     try { request("DELETE", "ping", null) } catch (e: Exception) { }
-                    "Connected. " + ageLabel(receiverAgeSecBlocking())
+                    val phones = listPhonesBlocking().orEmpty()
+                    "Connected. " + if (phones.isEmpty()) "No receiving phone has checked in yet."
+                    else "Receiving phones: " + phones.joinToString(", ") { (n, a) ->
+                        if (a == Long.MAX_VALUE) "$n (never)" else if (a < 150) "$n (online)" else "$n (last seen ${a / 60} min ago)"
+                    } + "."
                 }
                 code == 401 || code == 403 -> "Firebase refused it (HTTP $code). Paste the rules from the instructions into Realtime Database > Rules and Publish."
                 code == 404 -> "Not found (HTTP 404). Check the database link."
@@ -152,13 +194,13 @@ object RelayClient {
      * Watches a mailbox and calls [onMessage] for each new message, oldest first. Reconnects by itself.
      * The caller deletes messages it has handled.
      */
-    fun listen(scope: CoroutineScope, box: String, onMessage: (String, JSONObject) -> Unit): Job {
+    fun listen(scope: CoroutineScope, peer: String, box: String, onMessage: (String, JSONObject) -> Unit): Job {
         val current = AtomicReference<HttpURLConnection?>(null)
         val job = scope.launch(Dispatchers.IO) {
             val seen = HashSet<String>()
             while (isActive) {
                 try {
-                    val c = URL("${room()}/$box.json").openConnection() as HttpURLConnection
+                    val c = URL("${room()}/phones/$peer/$box.json").openConnection() as HttpURLConnection
                     current.set(c)
                     c.setRequestProperty("Accept", "text/event-stream")
                     c.connectTimeout = 15_000
@@ -212,11 +254,10 @@ object RelayClient {
         items.sortedBy { it.second.optLong("ts") }.forEach { (k, v) -> if (seen.add(k)) onMessage(k, v) }
     }
 
-    private fun receiverAgeSecBlocking(): Long? = try {
-        val (code, text) = request("GET", "alive", null)
-        if (code !in 200..299 || text.isBlank() || text == "null") null
-        else (System.currentTimeMillis() - JSONObject(text).optLong("ts")) / 1000
-    } catch (e: Exception) { null }
+    /** Names are used as database keys, so keep them simple. */
+    fun cleanName(raw: String): String =
+        raw.lowercase(Locale.ROOT).map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '-' }
+            .joinToString("").trim('-').take(24)
 
     fun randomCode(): String {
         val chars = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -246,6 +287,8 @@ class RelayReceiverService : Service() {
     private var oldMusic = -1
     private var wake: PowerManager.WakeLock? = null
 
+    private val RING_MAX_MS = 180_000L
+    private val me: String get() = AppSettings.receiverName
     private var handleJob: Job? = null
     @Volatile private var ignoreUntil = 0L
 
@@ -253,6 +296,18 @@ class RelayReceiverService : Service() {
         const val ACTION_HANGUP = "com.equalai.assistant.RELAY_HANGUP"
         /** True while a call from Equal is going on (drives the Hang up button in the app). */
         var live by mutableStateOf(false)
+
+        /** True while the full-screen "Attend / Cancel" ring is showing. */
+        var ringing by mutableStateOf(false)
+        var ringFrom by mutableStateOf("")
+        @Volatile private var decision: CompletableDeferred<Boolean>? = null
+        const val ACTION_ACCEPT = "com.equalai.assistant.RELAY_ACCEPT"
+        const val ACTION_DECLINE = "com.equalai.assistant.RELAY_DECLINE"
+
+        /** Called by the full-screen ring: true = Attend, false = Cancel. */
+        fun decide(accept: Boolean) { decision?.complete(accept) }
+        internal fun newDecision(): CompletableDeferred<Boolean> = CompletableDeferred<Boolean>().also { decision = it }
+        internal fun clearDecision() { decision = null }
 
         fun hangUp(ctx: Context) {
             try { ctx.startService(Intent(ctx, RelayReceiverService::class.java).setAction(ACTION_HANGUP)) } catch (e: Exception) { }
@@ -286,10 +341,12 @@ class RelayReceiverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_ACCEPT) { decide(true); return START_STICKY }
+        if (intent?.action == ACTION_DECLINE) { decide(false); return START_STICKY }
         if (intent?.action == ACTION_HANGUP) {
             scope.launch {
                 abortCurrent()
-                RelayClient.send("r2c", JSONObject().put("kind", "hangup"))
+                RelayClient.send(me, "r2c", JSONObject().put("kind", "hangup"))
             }
             return START_STICKY
         }
@@ -298,11 +355,11 @@ class RelayReceiverService : Service() {
             return START_NOT_STICKY
         }
         if (listenJob?.isActive != true) {
-            listenJob = RelayClient.listen(scope, "c2r") { key, msg ->
+            listenJob = RelayClient.listen(scope, me, "c2r") { key, msg ->
                 if (msg.optString("kind") == "abort") {
                     // the caller cancelled: stop right now instead of waiting behind queued messages
                     scope.launch {
-                        RelayClient.delete("c2r/$key")
+                        RelayClient.delete(me, "c2r/$key")
                         abortCurrent()
                     }
                 } else inbox.trySend(key to msg)
@@ -320,7 +377,7 @@ class RelayReceiverService : Service() {
             beat?.cancel()
             beat = scope.launch {
                 while (isActive) {
-                    RelayClient.heartbeat()
+                    RelayClient.heartbeat(me)
                     delay(45_000)
                 }
             }
@@ -373,13 +430,13 @@ class RelayReceiverService : Service() {
     // ---------------------------------------------------------------- handling messages
 
     private suspend fun handle(key: String, msg: JSONObject) {
-        RelayClient.delete("c2r/$key")
+        RelayClient.delete(me, "c2r/$key")
         if (System.currentTimeMillis() - msg.optLong("ts") > 150_000) return        // an old message from a missed call
         if (msg.optString("kind") != "ring" && System.currentTimeMillis() < ignoreUntil) return   // call was hung up
         if (msg.optString("kind") == "ring") ignoreUntil = 0L
         lastActivity = System.currentTimeMillis()
         when (msg.optString("kind")) {
-            "ring" -> beginCall()
+            "ring" -> beginCall(from = msg.optString("from"))
             "say" -> {
                 if (!inCall) beginCall(silent = true)
                 val lang = msg.optString("lang")
@@ -403,9 +460,9 @@ class RelayReceiverService : Service() {
         lastActivity = System.currentTimeMillis()
     }
 
-    private suspend fun beginCall(silent: Boolean = false) {
+    private suspend fun beginCall(silent: Boolean = false, from: String = "") {
         if (inCall) {
-            if (!silent) RelayClient.send("r2c", JSONObject().put("kind", "ack"))
+            if (!silent) RelayClient.send(me, "r2c", JSONObject().put("kind", "ack"))
             return
         }
         inCall = true
@@ -423,9 +480,20 @@ class RelayReceiverService : Service() {
             oldMusic = am.getStreamVolume(AudioManager.STREAM_MUSIC)
             am.setStreamVolume(AudioManager.STREAM_MUSIC, (am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 0.85f).toInt(), 0)
         } catch (e: Exception) { }
-        if (!silent) RelayClient.send("r2c", JSONObject().put("kind", "ack"))
+        if (!silent) RelayClient.send(me, "r2c", JSONObject().put("kind", "ack"))
         AssistantBridge.callNote("Incoming call from Equal.")
-        if (!silent) ring()
+        if (!silent) {
+            // full-screen ring: the person taps Attend or Cancel; if they do neither it keeps ringing
+            val answer = waitForAttend(from)
+            if (answer != 1) {
+                RelayClient.send(me, "r2c", JSONObject().put("kind", if (answer == 0) "declined" else "missed"))
+                ignoreUntil = System.currentTimeMillis() + 60_000
+                while (inbox.tryReceive().isSuccess) { }
+                finishCall()
+                return
+            }
+            RelayClient.send(me, "r2c", JSONObject().put("kind", "attend"))
+        }
         watchdog?.cancel()
         watchdog = scope.launch {
             while (isActive && inCall) {
@@ -455,24 +523,77 @@ class RelayReceiverService : Service() {
 
     // ---------------------------------------------------------------- sound
 
-    private suspend fun ring() {
+    /** Rings (sound, vibration, full-screen screen) until the person taps. 1 = Attend, 0 = Cancel, -1 = nobody tapped. */
+    private suspend fun waitForAttend(from: String): Int {
+        val d = RelayReceiverService.newDecision()
+        ringFrom = if (from.isBlank()) "Equal" else from
+        ringing = true
+        var tone: Ringtone? = null
+        var vib: Vibrator? = null
         try {
-            val r = RingtoneManager.getRingtone(applicationContext, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
-            if (Build.VERSION.SDK_INT >= 28) {
-                r.audioAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
-            }
             try {
-                r.play()
-                delay(3_500)
-            } finally {
-                r.stop()                                         // also when the call is hung up during the ring
+                tone = RingtoneManager.getRingtone(applicationContext, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
+                if (Build.VERSION.SDK_INT >= 28) {
+                    tone.audioAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+                    tone.isLooping = true
+                }
+                tone.play()
+            } catch (e: Exception) { }
+            try {
+                vib = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                vib?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 800, 700), 0))
+            } catch (e: Exception) { }
+            val deadline = System.currentTimeMillis() + RING_MAX_MS
+            var lastShown = 0L
+            while (!d.isCompleted && System.currentTimeMillis() < deadline) {
+                val now = System.currentTimeMillis()
+                lastActivity = now
+                if (now - lastShown > 25_000) { showRingScreen(); lastShown = now }
+                try { if (tone != null && !tone.isPlaying) tone.play() } catch (e: Exception) { }
+                withTimeoutOrNull(1_000) { d.await() }
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            delay(500)
+            return if (d.isCompleted) (if (d.await()) 1 else 0) else -1
+        } finally {
+            try { tone?.stop() } catch (e: Exception) { }
+            try { vib?.cancel() } catch (e: Exception) { }
+            ringing = false
+            RelayReceiverService.clearDecision()
+            try { getSystemService(NotificationManager::class.java)?.cancel(1003) } catch (e: Exception) { }
         }
+    }
+
+    /** Puts the ring on the whole screen, over the lock screen if needed, and (re)posts the call notification. */
+    private fun showRingScreen() {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm?.createNotificationChannel(
+                NotificationChannel("equal_ring", "Equal AI incoming call", NotificationManager.IMPORTANCE_HIGH).apply {
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+            )
+        }
+        val open = Intent(this, RelayRingActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+        val full = PendingIntent.getActivity(this, 11, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        fun act(code: Int, action: String) = PendingIntent.getService(
+            this, code, Intent(this, RelayReceiverService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = NotificationCompat.Builder(this, "equal_ring")
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("Incoming Equal call")
+            .setContentText("$ringFrom is calling")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setOngoing(true)
+            .setFullScreenIntent(full, true)
+            .setContentIntent(full)
+            .addAction(android.R.drawable.ic_menu_call, "Attend", act(21, ACTION_ACCEPT))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", act(22, ACTION_DECLINE))
+            .build()
+        try { nm?.notify(1003, n) } catch (e: Exception) { }
+        try { startActivity(open) } catch (e: Exception) { }
     }
 
     private suspend fun beep() {
@@ -554,7 +675,7 @@ class RelayReceiverService : Service() {
 
     private suspend fun info(text: String) {
         AssistantBridge.log("Receiver: $text")
-        RelayClient.send("r2c", JSONObject().put("kind", "info").put("text", text))
+        RelayClient.send(me, "r2c", JSONObject().put("kind", "info").put("text", text))
     }
 
     // ---------------------------------------------------------------- listening
@@ -572,7 +693,7 @@ class RelayReceiverService : Service() {
             val wav = Wav.header(pcm.size, 16_000) + pcm
             reply.put("audio", Base64.encodeToString(wav, Base64.NO_WRAP)).put("mime", "audio/wav")
         }
-        RelayClient.send("r2c", reply)
+        RelayClient.send(me, "r2c", reply)
     }
 
     /** Records until the person has spoken and then paused. Returns null if nobody spoke. */
@@ -639,25 +760,78 @@ class RelayReceiverService : Service() {
 }
 
 // ============================================================================
+// FULL-SCREEN RING: Attend / Cancel
+// ============================================================================
+
+class RelayRingActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        setContent {
+            val ringing = RelayReceiverService.ringing
+            LaunchedEffect(ringing) { if (!ringing) finish() }
+            Column(
+                modifier = Modifier.fillMaxSize().background(Color(0xFF0F172A)).padding(24.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 64.dp)) {
+                    Text("Incoming call", color = Color(0xFF94A3B8), fontSize = 20.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        RelayReceiverService.ringFrom, color = Color.White, fontSize = 38.sp,
+                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Equal AI", color = Color(0xFF94A3B8), fontSize = 18.sp)
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.padding(bottom = 32.dp)) {
+                    Button(
+                        onClick = { RelayReceiverService.decide(true) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
+                        modifier = Modifier.fillMaxWidth().height(110.dp)
+                    ) { Text("ATTEND", fontSize = 32.sp, fontWeight = FontWeight.Bold) }
+                    Button(
+                        onClick = { RelayReceiverService.decide(false) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                        modifier = Modifier.fillMaxWidth().height(110.dp)
+                    ) { Text("CANCEL", fontSize = 32.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // YOUR PHONE: places the call, runs the conversation with Gemini
 // ============================================================================
 
 object RelayCall {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    @Volatile private var running = false
-    @Volatile private var currentInbox: Channel<JSONObject>? = null
+    private val busy: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val inboxes = java.util.concurrent.ConcurrentHashMap<String, Channel<JSONObject>>()
 
     /** True while an app call is going on (drives the Cancel call button in the app). */
     var active by mutableStateOf(false)
 
     /** Hangs up from this phone: the other phone stops ringing/speaking at once. */
     fun cancel() {
-        if (!running) return
-        currentInbox?.trySend(JSONObject().put("kind", "hangup").put("by", "you"))
-        scope.launch {
-            RelayClient.delete("c2r")
-            RelayClient.send("c2r", JSONObject().put("kind", "abort"))
+        for ((peer, ch) in inboxes) {
+            ch.trySend(JSONObject().put("kind", "hangup").put("by", "you"))
+            scope.launch {
+                RelayClient.delete(peer, "c2r")
+                RelayClient.send(peer, "c2r", JSONObject().put("kind", "abort"))
+            }
         }
     }
     private const val MAX_TURNS = 8
@@ -665,58 +839,69 @@ object RelayCall {
 
     private data class Turn(val said: String, val reply: String, val done: Boolean)
 
+    /** Names of the phones this task calls (comma-separated in the task). */
+    fun peersOf(task: ScheduledActionItem): List<String> =
+        task.recipients.split(',').map { RelayClient.cleanName(it) }.filter { it.isNotBlank() }.distinct()
+
+    /** Calls every chosen phone at the same time, each with its own conversation. */
     fun start(ctx: Context, task: ScheduledActionItem) {
         val app = ctx.applicationContext
-        if (running) {
-            AssistantBridge.callNote("An app call is already in progress.")
+        AppSettings.init(app)
+        val peers = peersOf(task)
+        if (peers.isEmpty()) {
+            AssistantBridge.callNote("App call not placed: no phone was chosen to call.")
             return
         }
-        running = true
-        active = true
-        scope.launch {
-            var wl: PowerManager.WakeLock? = null
-            try {
-                val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
-                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "equalai:relaycall").apply { acquire(8 * 60_000L) }
-            } catch (e: Exception) { }
-            try {
-                AppSettings.init(app)
-                run(app, task)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AssistantBridge.callNote("App call failed: ${e.localizedMessage}")
-            } finally {
-                running = false
-                active = false
-                currentInbox = null
-                try { wl?.let { if (it.isHeld) it.release() } } catch (e: Exception) { }
+        for (peer in peers) {
+            if (!busy.add(peer)) {
+                AssistantBridge.callNote("App call: $peer is already being called.")
+                continue
+            }
+            active = true
+            scope.launch {
+                var wl: PowerManager.WakeLock? = null
+                try {
+                    val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "equalai:relaycall:$peer").apply { acquire(8 * 60_000L) }
+                } catch (e: Exception) { }
+                try {
+                    run(app, task, peer)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AssistantBridge.callNote("App call to $peer failed: ${e.localizedMessage}")
+                } finally {
+                    inboxes.remove(peer)
+                    busy.remove(peer)
+                    active = busy.isNotEmpty()
+                    try { wl?.let { if (it.isHeld) it.release() } } catch (e: Exception) { }
+                }
             }
         }
     }
 
-    private suspend fun run(ctx: Context, task: ScheduledActionItem) {
+    private suspend fun run(ctx: Context, task: ScheduledActionItem, peer: String) {
         if (!RelayClient.configured) {
             AssistantBridge.callNote("App call not placed: fill in the database link and pairing code in Setup first.")
-            noAnswer(ctx, task, "not set up")
+            noAnswer(ctx, task, peer, "not set up")
             return
         }
-        val id = "app_${System.currentTimeMillis()}"
+        val id = "app_${System.currentTimeMillis()}_$peer"
         val started = System.currentTimeMillis()
         val lines = ArrayList<String>()
         val notes = ArrayList<String>()
         val owner = AppSettings.ownerName.ifBlank { "the owner" }
         val lang = Locale.getDefault().toLanguageTag()
         val inbox = Channel<JSONObject>(Channel.UNLIMITED)
-        currentInbox = inbox
+        inboxes[peer] = inbox
 
-        fun note(m: String) { notes.add(m); AssistantBridge.callNote("App call: $m") }
+        fun note(m: String) { notes.add(m); AssistantBridge.callNote("App call to $peer: $m") }
 
         fun save(state: String, summary: String) {
             CallStore.upsert(
                 ctx,
                 CallRecord(
-                    id = id, number = task.target, caller = "App call to ${task.target}", summary = summary,
+                    id = id, number = peer, caller = "App call to $peer", summary = summary,
                     transcript = (lines + notes.map { "(note) $it" }).joinToString("\n"), startedAt = started,
                     updatedAt = System.currentTimeMillis(),
                     durationSec = ((System.currentTimeMillis() - started) / 1000).toInt(), state = state, audioOk = true
@@ -724,33 +909,34 @@ object RelayCall {
             )
         }
 
-        RelayClient.delete("r2c")
-        RelayClient.delete("c2r")
-        val listener = RelayClient.listen(scope, "r2c") { key, msg ->
-            scope.launch { RelayClient.delete("r2c/$key") }
+        RelayClient.delete(peer, "r2c")
+        RelayClient.delete(peer, "c2r")
+        val listener = RelayClient.listen(scope, peer, "r2c") { key, msg ->
+            scope.launch { RelayClient.delete(peer, "r2c/$key") }
             if (System.currentTimeMillis() - msg.optLong("ts") < 180_000) {
                 if (msg.optString("kind") == "info") note(msg.optString("text")) else inbox.trySend(msg)
             }
         }
         var hungUp = false
         // waits for a message of this kind; a hang-up from either side ends the wait
-        suspend fun waitFor(kind: String, ms: Long): JSONObject? = withTimeoutOrNull(ms) {
+        suspend fun waitForAny(ms: Long, vararg kinds: String): JSONObject? = withTimeoutOrNull(ms) {
             var got: JSONObject? = null
             while (got == null) {
                 val m = inbox.receive()
                 val k = m.optString("kind")
-                if (k == kind) got = m
+                if (k in kinds) got = m
                 else if (k == "hangup") { hungUp = true; got = m }
             }
             got
         }?.takeIf { !hungUp }
+        suspend fun waitFor(kind: String, ms: Long): JSONObject? = waitForAny(ms, kind)
 
         try {
             save("ANSWERING", "Calling…")
-            note("calling ${task.target} through the Equal app. " + RelayClient.ageLabel(RelayClient.receiverAgeSec()))
+            note("calling through the Equal app. " + RelayClient.ageLabel(peer, RelayClient.receiverAgeSec(peer)))
 
             suspend fun say(text: String, listen: Boolean) {
-                RelayClient.send("c2r", JSONObject().put("kind", "say").put("text", text).put("listen", listen).put("lang", lang))
+                RelayClient.send(peer, "c2r", JSONObject().put("kind", "say").put("text", text).put("listen", listen).put("lang", lang))
             }
 
             val hello = task.greeting.trim()
@@ -772,10 +958,10 @@ object RelayCall {
             if (task.converse && !canTalk) note("the assistant won't talk because $whyNot.")
 
             // Everything is posted up front, in order, so it uploads while their phone is still ringing.
-            if (!RelayClient.send("c2r", JSONObject().put("kind", "ring"))) {
+            if (!RelayClient.send(peer, "c2r", JSONObject().put("kind", "ring").put("from", owner))) {
                 note("could not reach the database (no internet, or the link is wrong).")
                 save("DONE", "App call could not be placed: no connection to the database.")
-                noAnswer(ctx, task, "no connection")
+                noAnswer(ctx, task, peer, "no connection")
                 return
             }
             if (hello.isNotBlank()) {
@@ -785,7 +971,7 @@ object RelayCall {
             if (clip != null) {
                 lines.add("Assistant: [pre-recorded voice message]")
                 RelayClient.send(
-                    "c2r",
+                    peer, "c2r",
                     JSONObject().put("kind", "clip").put("ext", clip.extension.ifBlank { "m4a" })
                         .put("audio", Base64.encodeToString(clip.readBytes(), Base64.NO_WRAP))
                         .put("listen", text.isBlank() && canTalk)
@@ -803,18 +989,43 @@ object RelayCall {
             val ack = waitFor("ack", 45_000)
             if (hungUp) {
                 note("call cancelled.")
-                RelayClient.delete("c2r")
+                RelayClient.delete(peer, "c2r")
                 save("DONE", "Call cancelled before it was answered.")
                 return
             }
             if (ack == null) {
-                RelayClient.delete("c2r")                              // so it doesn't ring later
+                RelayClient.delete(peer, "c2r")                              // so it doesn't ring later
                 save("DONE", "Their phone didn't pick up (Equal not running there, or no internet).")
-                noAnswer(ctx, task, "not answered")
+                noAnswer(ctx, task, peer, "not answered")
                 return
             }
-            note("answered by their phone.")
+            note("delivered to their phone. Waiting for them to tap Attend or Cancel…")
+            save("ANSWERING", "Ringing…")
+            val decision = waitForAny(200_000, "attend", "declined", "missed")
+            if (hungUp) {
+                note("call cancelled.")
+                RelayClient.delete(peer, "c2r")
+                save("DONE", "Call cancelled while ringing.")
+                return
+            }
+            when (decision?.optString("kind")) {
+                "declined" -> {
+                    note("they tapped Cancel: the ring was delivered and the call was declined.")
+                    RelayClient.delete(peer, "c2r")
+                    save("DONE", "$peer received the ring and tapped Cancel.")
+                    return
+                }
+                "attend" -> note("they tapped Attend.")
+                else -> {
+                    RelayClient.delete(peer, "c2r")
+                    RelayClient.send(peer, "c2r", JSONObject().put("kind", "abort"))
+                    save("DONE", "$peer's phone rang for 3 minutes, but nobody tapped Attend or Cancel.")
+                    noAnswer(ctx, task, peer, "rang but nobody tapped Attend or Cancel")
+                    return
+                }
+            }
             save("ANSWERING", "Call in progress…")
+            val talkStart = System.currentTimeMillis()
 
             var closed = false
             if (canTalk) {
@@ -826,7 +1037,7 @@ object RelayCall {
                 }
                 var silent = 0
                 for (turn in 1..MAX_TURNS) {
-                    if (System.currentTimeMillis() - started > MAX_MS) break
+                    if (System.currentTimeMillis() - talkStart > MAX_MS) break
                     note("waiting for their answer…")
                     val reply = waitFor("reply", if (turn == 1) 120_000 else 75_000)
                     if (hungUp) break
@@ -867,7 +1078,7 @@ object RelayCall {
             if (hungUp) {
                 note("call ended by hang-up.")
             } else {
-                RelayClient.send("c2r", JSONObject().put("kind", "end"))
+                RelayClient.send(peer, "c2r", JSONObject().put("kind", "end"))
                 delay(1_500)
             }
 
@@ -926,12 +1137,12 @@ object RelayCall {
     }
 
     /** Nobody answered (or the call couldn't be placed): try again later, or send the fallback text after the last try. */
-    private fun noAnswer(ctx: Context, t: ScheduledActionItem, why: String) {
+    private fun noAnswer(ctx: Context, t: ScheduledActionItem, peer: String, why: String) {
         val note: String
         if (t.retries > 0) {
             val gap = t.retryGapSec.coerceAtLeast(0)
             val waitMs = maxOf(gap, 3) * 1000L
-            val next = t.copy(id = newTaskId(), triggerAt = System.currentTimeMillis() + waitMs, retries = t.retries - 1)
+            val next = t.copy(id = newTaskId(), triggerAt = System.currentTimeMillis() + waitMs, retries = t.retries - 1, recipients = peer)
             if (gap <= 120) {
                 scope.launch {
                     delay(waitMs)
@@ -943,12 +1154,12 @@ object RelayCall {
                 Scheduler.add(ctx, next)
             }
             note = "App call $why. Trying again " + (if (gap == 0) "right away" else "in $gap s") + " (${t.retries} left)."
-        } else if (t.fallbackText.isNotBlank()) {
+        } else if (t.fallbackText.isNotBlank() && peersOf(t).size <= 1) {
             ActionExecutor.sendSms(ctx, t.target, t.fallbackText, t.simSlot)
             note = "App call $why after all tries. Your message was sent by text."
         } else {
             note = "App call $why after all tries."
         }
-        AssistantBridge.callNote(note)
+        AssistantBridge.callNote("$peer: $note")
     }
 }
