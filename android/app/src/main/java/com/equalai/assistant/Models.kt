@@ -51,7 +51,8 @@ data class ScheduledActionItem(
     val fallbackText: String = "",       // sent by SMS when nobody answered after all attempts
     val greeting: String = "",           // CALL_SPEAK: said first, before the voice clip and the custom text
     val viaWhatsApp: Boolean = false,    // CALL_SPEAK: place a WhatsApp voice call instead of a phone call
-    val viaApp: Boolean = false          // CALL_SPEAK: call through the Equal app on their phone (Firebase relay)
+    val viaApp: Boolean = false,         // CALL_SPEAK: call through the Equal app on their phone (Firebase relay)
+    val recipients: String = ""          // app calls: comma-separated names of the receiving phones
 ) {
     val timeLabel: String
         get() = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(triggerAt))
@@ -71,6 +72,7 @@ data class ScheduledActionItem(
         .put("gr", greeting)
         .put("wa", viaWhatsApp)
         .put("app", viaApp)
+        .put("rcp", recipients)
 
     companion object {
         fun fromJson(o: JSONObject) = ScheduledActionItem(
@@ -87,7 +89,8 @@ data class ScheduledActionItem(
             fallbackText = o.optString("fb", ""),
             greeting = o.optString("gr", ""),
             viaWhatsApp = o.optBoolean("wa", false),
-            viaApp = o.optBoolean("app", false)
+            viaApp = o.optBoolean("app", false),
+            recipients = o.optString("rcp", "")
         )
     }
 }
@@ -298,6 +301,48 @@ object AppSettings {
     var relayCode: String
         get() = prefs.getString("relay_code", "") ?: ""
         set(v) { prefs.edit().putString("relay_code", v.trim()).apply() }
+
+    /** Voice message played first to people who ring you (instead of the spoken greeting): one default, plus per-number ones. */
+    var callerClipDefault: String
+        get() = prefs.getString("caller_clip_default", "") ?: ""
+        set(v) { prefs.edit().putString("caller_clip_default", v).apply() }
+
+    private fun numKey(number: String): String = number.filter { it.isDigit() }.takeLast(10)
+
+    private fun clipMap(): org.json.JSONObject =
+        try { org.json.JSONObject(prefs.getString("caller_clips", "{}") ?: "{}") } catch (e: Exception) { org.json.JSONObject() }
+
+    /** The voice message for this caller: the one set for their number, else the default, else null. */
+    fun callerClipFor(number: String): String? {
+        val k = numKey(number)
+        val own = if (k.length >= 5) clipMap().optString(k, "") else ""
+        val path = own.ifBlank { callerClipDefault }
+        return path.takeIf { it.isNotBlank() && java.io.File(it).exists() }
+    }
+
+    fun setCallerClip(number: String, path: String?) {
+        val k = numKey(number)
+        if (k.length < 5) return
+        val m = clipMap()
+        if (path == null) m.remove(k) else m.put(k, path)
+        prefs.edit().putString("caller_clips", m.toString()).apply()
+    }
+
+    /** (last 10 digits of the number, clip path) for every number that has its own voice message. */
+    fun callerClipEntries(): List<Pair<String, String>> {
+        val m = clipMap()
+        return m.keys().asSequence().map { it to m.optString(it) }.sortedBy { it.first }.toList()
+    }
+
+    /** This phone's name for app-to-app calls: other phones pick it from a list. Letters, digits, - and _ only. */
+    var receiverName: String
+        get() {
+            val saved = prefs.getString("receiver_name", "") ?: ""
+            if (saved.isNotBlank()) return saved
+            val d = RelayClient.cleanName(android.os.Build.MODEL ?: "phone")
+            return d.ifBlank { "phone" }
+        }
+        set(v) { prefs.edit().putString("receiver_name", RelayClient.cleanName(v)).apply() }
 
     /** This phone waits for app-to-app calls and answers them automatically. */
     var receiverOn: Boolean
