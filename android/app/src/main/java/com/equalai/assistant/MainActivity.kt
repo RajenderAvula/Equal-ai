@@ -445,6 +445,14 @@ fun SchedulerTab(context: Context) {
     var foundPhones by remember { mutableStateOf<List<Pair<String, Long>>>(emptyList()) }
     var phonesStatus by remember { mutableStateOf("") }
     val extraDays = remember { mutableStateListOf<Long>() }
+    val variants = remember { mutableStateListOf<ContentVariant>() }
+    var pickingFor by remember { mutableStateOf<ContentVariant?>(null) }
+    val variantClipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { }
+            pickingFor?.clipUri = uri.toString()
+        }
+    }
     val timesOfDay = remember { mutableStateListOf<Int>() }          // minutes after midnight; empty = just the time picked above
     var repeatDays by remember { mutableStateOf(0f) }
     var retries by remember { mutableStateOf(0f) }
@@ -853,6 +861,16 @@ fun SchedulerTab(context: Context) {
         Text("Or repeat every day for ${repeatDays.toInt()} more day(s) after the chosen date", fontSize = 13.sp)
         Slider(value = repeatDays, onValueChange = { repeatDays = it }, valueRange = 0f..30f, steps = 29)
 
+        if (actionType == "CALL_SPEAK" || actionType == "SMS" || actionType == "WHATSAPP") {
+            VariantEditor(
+                variants = variants,
+                timeChoices = timesOfDay.toList(),
+                personChoices = if (actionType == "CALL_SPEAK" && viaApp) recipients.toList() else emptyList(),
+                showGreeting = actionType == "CALL_SPEAK",
+                pickClip = { v -> pickingFor = v; variantClipPicker.launch(arrayOf("audio/*")) }
+            )
+        }
+
         Button(
             onClick = {
                 val appCall = actionType == "CALL_SPEAK" && viaApp
@@ -861,7 +879,8 @@ fun SchedulerTab(context: Context) {
                         Toast.makeText(context, "Tap Find phones and choose who to call", Toast.LENGTH_SHORT).show()
                     !appCall && target.isBlank() ->
                         Toast.makeText(context, if (actionType == "OPEN_APP") "Choose an app" else "Enter a contact", Toast.LENGTH_SHORT).show()
-                    actionType != "OPEN_APP" && message.isBlank() && attachmentUriString == null ->
+                    actionType != "OPEN_APP" && message.isBlank() && attachmentUriString == null &&
+                        variants.none { it.message.isNotBlank() || it.clipUri != null } ->
                         Toast.makeText(context, "Enter a message", Toast.LENGTH_SHORT).show()
                     triggerAt <= System.currentTimeMillis() + 5_000L && extraDays.isEmpty() && repeatDays.toInt() == 0 && timesOfDay.isEmpty() ->
                         Toast.makeText(context, "Pick a time in the future", Toast.LENGTH_SHORT).show()
@@ -891,41 +910,58 @@ fun SchedulerTab(context: Context) {
                         val isCall = actionType == "CALL_SPEAK"
                         var failed = false
                         var made = 0
+                        val people: List<String?> = if (isCall && viaApp) recipients.toList() else listOf(null)
                         for (at in future) {
-                            val id = newTaskId()
-                            val clipPath = when (actionType) {
-                                "WHATSAPP" -> attachmentUriString
-                                "CALL_SPEAK" -> attachmentUriString?.let { copyClip(context, Uri.parse(it), id) }
-                                else -> null
+                            val moment = Calendar.getInstance().apply { timeInMillis = at }
+                            val minutesOfDay = moment.get(Calendar.HOUR_OF_DAY) * 60 + moment.get(Calendar.MINUTE)
+                            val weekday = moment.get(Calendar.DAY_OF_WEEK)
+                            // what each person gets at this moment: the first matching variant, else the main content
+                            val groups = LinkedHashMap<Triple<String, String, String?>, MutableList<String>>()
+                            for (person in people) {
+                                val v = variants.firstOrNull { it.matches(person, minutesOfDay, weekday) }
+                                val g = (v?.greeting.orEmpty().ifBlank { greet }).trim()
+                                val m = v?.message.orEmpty().ifBlank { message }
+                                val c = v?.clipUri ?: attachmentUriString
+                                groups.getOrPut(Triple(g, m, c)) { ArrayList() }.add(person.orEmpty())
                             }
-                            if (actionType == "CALL_SPEAK" && attachmentUriString != null && clipPath == null) { failed = true; break }
-                            Scheduler.add(
-                                context,
-                                ScheduledActionItem(
-                                    id = id,
-                                    actionType = actionType,
-                                    target = if (isCall && viaApp && target.isBlank()) recipients.joinToString(", ") else target.trim(),
-                                    message = if (actionType == "OPEN_APP") appLabel else message,
-                                    triggerAt = at,
-                                    attachmentUri = clipPath,
-                                    converse = converse,
-                                    viaWhatsApp = isCall && viaWa && !viaApp,
-                                    viaApp = isCall && viaApp,
-                                    recipients = if (isCall && viaApp) recipients.joinToString(",") else "",
-                                    simSlot = simSlot,
-                                    retries = if (isCall) retries.toInt() else 0,
-                                    retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
-                                    fallbackText = if (isCall) fallback.trim() else "",
-                                    greeting = if (isCall) greet.trim() else ""
+                            for ((content, persons) in groups) {
+                                val id = newTaskId()
+                                val clipPath = when (actionType) {
+                                    "WHATSAPP" -> content.third
+                                    "CALL_SPEAK" -> content.third?.let { copyClip(context, Uri.parse(it), id) }
+                                    else -> null
+                                }
+                                if (actionType == "CALL_SPEAK" && content.third != null && clipPath == null) { failed = true; break }
+                                val names = persons.filter { it.isNotBlank() }
+                                Scheduler.add(
+                                    context,
+                                    ScheduledActionItem(
+                                        id = id,
+                                        actionType = actionType,
+                                        target = if (isCall && viaApp && target.isBlank()) names.joinToString(", ") else target.trim(),
+                                        message = if (actionType == "OPEN_APP") appLabel else content.second,
+                                        triggerAt = at,
+                                        attachmentUri = clipPath,
+                                        converse = converse,
+                                        viaWhatsApp = isCall && viaWa && !viaApp,
+                                        viaApp = isCall && viaApp,
+                                        recipients = if (isCall && viaApp) names.joinToString(",") else "",
+                                        simSlot = simSlot,
+                                        retries = if (isCall) retries.toInt() else 0,
+                                        retryGapSec = (gapSec.toIntOrNull() ?: 120).coerceIn(0, 3600),
+                                        fallbackText = if (isCall) fallback.trim() else "",
+                                        greeting = if (isCall) content.first else ""
+                                    )
                                 )
-                            )
-                            made++
+                                made++
+                            }
+                            if (failed) break
                         }
                         if (failed) {
                             Toast.makeText(context, "Could not read that voice clip", Toast.LENGTH_SHORT).show()
                         } else {
                             target = ""; message = ""; attachmentUriString = null; appLabel = ""; fallback = ""; greet = ""
-                            extraDays.clear(); repeatDays = 0f; timesOfDay.clear()
+                            extraDays.clear(); repeatDays = 0f; timesOfDay.clear(); variants.clear()
                             Toast.makeText(
                                 context,
                                 if (made == 0) "Those times are all in the past" else if (made > 1) "Scheduled $made times" else "Scheduled",
