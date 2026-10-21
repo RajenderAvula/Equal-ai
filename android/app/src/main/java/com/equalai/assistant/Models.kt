@@ -334,6 +334,20 @@ object AppSettings {
         return m.keys().asSequence().map { it to m.optString(it) }.sortedBy { it.first }.toList()
     }
 
+    /** Live calls: relay (TURN) server used when two phones can't reach each other directly. Default is a free public one. */
+    var turnUrls: String
+        get() = prefs.getString("turn_urls", "turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,turns:openrelay.metered.ca:443?transport=tcp")
+            ?: ""
+        set(v) { prefs.edit().putString("turn_urls", v.trim()).apply() }
+
+    var turnUser: String
+        get() = prefs.getString("turn_user", "openrelayproject") ?: ""
+        set(v) { prefs.edit().putString("turn_user", v.trim()).apply() }
+
+    var turnPass: String
+        get() = prefs.getString("turn_pass", "openrelayproject") ?: ""
+        set(v) { prefs.edit().putString("turn_pass", v.trim()).apply() }
+
     /** This phone's name for app-to-app calls: other phones pick it from a list. Letters, digits, - and _ only. */
     var receiverName: String
         get() {
