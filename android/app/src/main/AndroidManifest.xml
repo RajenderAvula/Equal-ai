@@ -62,6 +62,16 @@
                 android:value="Always-on background voice assistant" />
         </service>
 
+        <!-- Live two-way call screen -->
+        <activity
+            android:name=".LiveCallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="" />
+
         <!-- Full-screen Attend / Cancel ring for app-to-app calls -->
         <activity
             android:name=".RelayRingActivity"
