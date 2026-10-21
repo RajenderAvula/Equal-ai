@@ -1054,6 +1054,8 @@ fun CallsTab(context: Context) {
     var showSettings by remember { mutableStateOf(false) }
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var livePhones by remember { mutableStateOf<List<Pair<String, Long>>>(emptyList()) }
+    var liveStatus by remember { mutableStateOf("") }
     var clipTick by remember { mutableStateOf(0) }
     var clipNumber by remember { mutableStateOf("") }
     var clipFor by remember { mutableStateOf("") }                 // "" = the default message, otherwise the number being set
@@ -1135,15 +1137,51 @@ fun CallsTab(context: Context) {
             "Last call event: ${AssistantBridge.lastCallNote}", fontSize = 12.sp, color = Color.Gray,
             maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
         )
-        if (RelayCall.active || RelayReceiverService.live) {
+        if (RelayCall.active || RelayReceiverService.live || LiveCall.active) {
             Button(
                 onClick = {
+                    if (LiveCall.active) LiveCall.hangUp()
                     if (RelayCall.active) RelayCall.cancel()
                     if (RelayReceiverService.live) RelayReceiverService.hangUp(context)
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB91C1C)),
                 modifier = Modifier.fillMaxWidth()
-            ) { Text(if (RelayCall.active) "Cancel the app call" else "Hang up") }
+            ) { Text(if (LiveCall.active) "Hang up the live call" else if (RelayCall.active) "Cancel the app call" else "Hang up") }
+        }
+        if (LiveCall.active) {
+            OutlinedButton(
+                onClick = { context.startActivity(Intent(context, LiveCallActivity::class.java)) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Back to the call screen") }
+        }
+
+        Text("Live call over the internet", fontWeight = FontWeight.SemiBold)
+        Text(
+            "Talk to another phone running Equal, like a WhatsApp call. It rings full-screen there (Attend / Cancel). " +
+                "Both phones need the same database link and pairing code (Setup), and the other phone's receiver switched on.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        OutlinedButton(onClick = {
+            scope.launch {
+                liveStatus = "Looking…"
+                val l = RelayClient.listPhones()
+                if (l == null) liveStatus = "Could not reach the database. Check Setup > App-to-app calls."
+                else {
+                    val me = AppSettings.receiverName
+                    livePhones = l.filter { it.first != me }
+                    liveStatus = if (livePhones.isEmpty()) "No other phone has switched its receiver on yet." else ""
+                }
+            }
+        }) { Text("Find phones") }
+        if (liveStatus.isNotBlank()) Text(liveStatus, fontSize = 11.sp, color = Color.Gray)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+            livePhones.forEach { (name, age) ->
+                Button(
+                    onClick = { LiveCall.startOutgoing(context, name) },
+                    enabled = !LiveCall.active,
+                    colors = ButtonDefaults.buttonColors(containerColor = Green)
+                ) { Text("Call $name" + if (age < 150) "" else " (offline?)") }
+            }
         }
 
         TextButton(onClick = { showSettings = !showSettings }, modifier = Modifier.fillMaxWidth()) {
@@ -1297,6 +1335,9 @@ fun SetupTab(context: Context) {
     var relayCode by remember { mutableStateOf(AppSettings.relayCode) }
     var receiverOn by remember { mutableStateOf(AppSettings.receiverOn) }
     var receiverName by remember { mutableStateOf(AppSettings.receiverName) }
+    var turnUrls by remember { mutableStateOf(AppSettings.turnUrls) }
+    var turnUser by remember { mutableStateOf(AppSettings.turnUser) }
+    var turnPass by remember { mutableStateOf(AppSettings.turnPass) }
     var relayStatus by remember { mutableStateOf("") }
     var jackStatus by remember { mutableStateOf("checking…") }
     LaunchedEffect(Unit) {
@@ -1583,6 +1624,26 @@ fun SetupTab(context: Context) {
                 "For reliable ringing, also set Equal to \"Unrestricted\" battery use, and open Equal once after every " +
                 "restart of that phone.",
             fontSize = 12.sp, color = Color.Gray
+        )
+        Text("Live calls: relay server", fontWeight = FontWeight.SemiBold)
+        Text(
+            "Live calls connect the two phones directly. Mobile networks often block that, so a relay (TURN) server is used " +
+                "as a fallback. The default is a free public one that may be slow or limited; for dependable calls make a free " +
+                "account at metered.ca (or any TURN provider) and paste its address, username and password here.",
+            fontSize = 12.sp, color = Color.Gray
+        )
+        OutlinedTextField(
+            value = turnUrls, onValueChange = { turnUrls = it; AppSettings.turnUrls = it },
+            label = { Text("TURN address(es), comma-separated") }, modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = turnUser, onValueChange = { turnUser = it; AppSettings.turnUser = it },
+            label = { Text("TURN username") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = turnPass, onValueChange = { turnPass = it; AppSettings.turnPass = it },
+            label = { Text("TURN password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth()
         )
         OutlinedButton(onClick = {
             try { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (e: Exception) { }
