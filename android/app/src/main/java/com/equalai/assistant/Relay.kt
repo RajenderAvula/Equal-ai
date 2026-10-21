@@ -301,6 +301,7 @@ class RelayReceiverService : Service() {
         /** True while the full-screen "Attend / Cancel" ring is showing. */
         var ringing by mutableStateOf(false)
         var ringFrom by mutableStateOf("")
+        var ringMessage by mutableStateOf("")
         @Volatile private var decision: CompletableDeferred<Boolean>? = null
         const val ACTION_ACCEPT = "com.equalai.assistant.RELAY_ACCEPT"
         const val ACTION_DECLINE = "com.equalai.assistant.RELAY_DECLINE"
@@ -449,7 +450,7 @@ class RelayReceiverService : Service() {
         if (msg.optString("kind") == "ring") ignoreUntil = 0L
         lastActivity = System.currentTimeMillis()
         when (msg.optString("kind")) {
-            "ring" -> if (msg.optString("mode") == "live") beginLive(msg.optString("from")) else beginCall(from = msg.optString("from"))
+            "ring" -> if (msg.optString("mode") == "live") beginLive(msg.optString("from")) else beginCall(from = msg.optString("from"), ringText = msg.optString("say"), lang = msg.optString("lang"))
             "offer" -> LiveCall.onOffer(msg.optString("sdp"))
             "ice" -> LiveCall.onIce(msg)
             "bye" -> LiveCall.onBye()
@@ -493,7 +494,7 @@ class RelayReceiverService : Service() {
         LiveCall.beginIncoming(applicationContext, me, from)
     }
 
-    private suspend fun beginCall(silent: Boolean = false, from: String = "") {
+    private suspend fun beginCall(silent: Boolean = false, from: String = "", ringText: String = "", lang: String = "") {
         if (inCall) {
             if (!silent) RelayClient.send(me, "r2c", JSONObject().put("kind", "ack"))
             return
@@ -517,7 +518,7 @@ class RelayReceiverService : Service() {
         AssistantBridge.callNote("Incoming call from Equal.")
         if (!silent) {
             // full-screen ring: the person taps Attend or Cancel; if they do neither it keeps ringing
-            val answer = waitForAttend(from)
+            val answer = waitForAttend(from, ringText, lang)
             if (answer != 1) {
                 RelayClient.send(me, "r2c", JSONObject().put("kind", if (answer == 0) "declined" else "missed"))
                 ignoreUntil = System.currentTimeMillis() + 60_000
@@ -557,9 +558,10 @@ class RelayReceiverService : Service() {
     // ---------------------------------------------------------------- sound
 
     /** Rings (sound, vibration, full-screen screen) until the person taps. 1 = Attend, 0 = Cancel, -1 = nobody tapped. */
-    private suspend fun waitForAttend(from: String): Int {
+    private suspend fun waitForAttend(from: String, ringText: String = "", lang: String = ""): Int {
         val d = RelayReceiverService.newDecision()
         ringFrom = if (from.isBlank()) "Equal" else from
+        ringMessage = ringText
         ringing = true
         var tone: Ringtone? = null
         var vib: Vibrator? = null
@@ -569,7 +571,7 @@ class RelayReceiverService : Service() {
                 if (Build.VERSION.SDK_INT >= 28) {
                     tone.audioAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
-                    tone.isLooping = true
+                    tone.isLooping = ringText.isBlank()                  // with a message: ring, then say it, repeatedly
                 }
                 tone.play()
             } catch (e: Exception) { }
@@ -583,14 +585,31 @@ class RelayReceiverService : Service() {
                 val now = System.currentTimeMillis()
                 lastActivity = now
                 if (now - lastShown > 25_000) { showRingScreen(); lastShown = now }
-                try { if (tone != null && !tone.isPlaying) tone.play() } catch (e: Exception) { }
-                withTimeoutOrNull(1_000) { d.await() }
+                if (ringText.isBlank()) {
+                    try { if (tone != null && !tone.isPlaying) tone.play() } catch (e: Exception) { }
+                    withTimeoutOrNull(1_000) { d.await() }
+                } else {
+                    // ring for a moment, then say the message aloud, then a short pause; again until Attend or Cancel
+                    try { if (tone != null && !tone.isPlaying) tone.play() } catch (e: Exception) { }
+                    withTimeoutOrNull(3_000) { d.await() }
+                    try { tone?.stop() } catch (e: Exception) { }
+                    if (!d.isCompleted) {
+                        val talk = scope.launch { speak(ringText, lang) }
+                        while (!d.isCompleted && talk.isActive) {
+                            lastActivity = System.currentTimeMillis()
+                            withTimeoutOrNull(300) { d.await() }
+                        }
+                        if (d.isCompleted) { talk.cancel(); try { tts?.stop() } catch (e: Exception) { } }
+                        else withTimeoutOrNull(1_500) { d.await() }
+                    }
+                }
             }
             return if (d.isCompleted) (if (d.await()) 1 else 0) else -1
         } finally {
             try { tone?.stop() } catch (e: Exception) { }
             try { vib?.cancel() } catch (e: Exception) { }
             ringing = false
+            ringMessage = ""
             RelayReceiverService.clearDecision()
             try { getSystemService(NotificationManager::class.java)?.cancel(1003) } catch (e: Exception) { }
         }
@@ -826,6 +845,13 @@ class RelayRingActivity : ComponentActivity() {
                     )
                     Spacer(Modifier.height(8.dp))
                     Text("Equal AI", color = Color(0xFF94A3B8), fontSize = 18.sp)
+                    if (RelayReceiverService.ringMessage.isNotBlank()) {
+                        Spacer(Modifier.height(24.dp))
+                        Text(
+                            RelayReceiverService.ringMessage, color = Color.White, fontSize = 24.sp,
+                            textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 8.dp)
+                        )
+                    }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.padding(bottom = 32.dp)) {
                     Button(
@@ -991,7 +1017,8 @@ object RelayCall {
             if (task.converse && !canTalk) note("the assistant won't talk because $whyNot.")
 
             // Everything is posted up front, in order, so it uploads while their phone is still ringing.
-            if (!RelayClient.send(peer, "c2r", JSONObject().put("kind", "ring").put("from", owner))) {
+            if (!RelayClient.send(peer, "c2r", JSONObject().put("kind", "ring").put("from", owner)
+                    .put("say", if (text.isNotBlank()) text else hello).put("lang", lang))) {
                 note("could not reach the database (no internet, or the link is wrong).")
                 save("DONE", "App call could not be placed: no connection to the database.")
                 noAnswer(ctx, task, peer, "no connection")
