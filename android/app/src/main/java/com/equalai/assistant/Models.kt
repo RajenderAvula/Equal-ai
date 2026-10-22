@@ -154,6 +154,9 @@ object AssistantBridge {
     fun isOffline(): Boolean = offlineMode || (foregroundService?.let { !Net.isOnline(it) } ?: false)
 
     /** Latest call-engine event, shown on the Calls tab so you can see why a call was or wasn't handled. */
+    /** Set by the Calendar tab ("Add an event on this day"); the Scheduler tab picks it up and fills in the date. */
+    var pendingScheduleDay by mutableStateOf<Long?>(null)
+
     var lastCallNote by mutableStateOf("No call handled yet")
 
     fun callNote(msg: String) {
