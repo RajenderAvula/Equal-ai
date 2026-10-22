@@ -177,6 +177,7 @@ fun EqualAssistantMainScreen() {
                 NavigationBarItem(selected = selectedTab == 0, onClick = { selectedTab = 0 }, icon = { Icon(Icons.Default.Notifications, null) }, label = { Text("Alerts") })
                 NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.Schedule, null) }, label = { Text("Scheduler") })
                 NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.PhoneCallback, null) }, label = { Text("Calls") })
+                NavigationBarItem(selected = selectedTab == 4, onClick = { selectedTab = 4 }, icon = { Icon(Icons.Default.CalendarMonth, null) }, label = { Text("Calendar") })
                 NavigationBarItem(selected = selectedTab == 3, onClick = { selectedTab = 3 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Setup") })
             }
         }
@@ -260,6 +261,7 @@ fun EqualAssistantMainScreen() {
                 0 -> NotificationsTab()
                 1 -> SchedulerTab(context)
                 2 -> CallsTab(context)
+                4 -> CalendarTab(context, onCreate = { day -> AssistantBridge.pendingScheduleDay = day; selectedTab = 1 })
                 else -> SetupTab(context)
             }
         }
@@ -464,6 +466,22 @@ fun SchedulerTab(context: Context) {
     var previewing by remember { mutableStateOf(false) }
     var textPreview by remember { mutableStateOf("") }
     val clipPlayer = remember { arrayOfNulls<MediaPlayer>(1) }
+
+    // "Add an event on this day" in the Calendar tab lands here with that date filled in
+    val pendingDay = AssistantBridge.pendingScheduleDay
+    LaunchedEffect(pendingDay) {
+        if (pendingDay != null) {
+            val now = System.currentTimeMillis()
+            val t = Calendar.getInstance().apply { timeInMillis = if (triggerAt > now) triggerAt else now + 10 * 60_000L }
+            val c = Calendar.getInstance().apply {
+                timeInMillis = pendingDay
+                set(Calendar.HOUR_OF_DAY, t.get(Calendar.HOUR_OF_DAY)); set(Calendar.MINUTE, t.get(Calendar.MINUTE))
+                set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }
+            triggerAt = c.timeInMillis
+            AssistantBridge.pendingScheduleDay = null
+        }
+    }
 
     fun stopPreview() {
         try { clipPlayer[0]?.stop() } catch (e: Exception) { }
